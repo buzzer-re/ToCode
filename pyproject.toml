@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tocode"
+version = "0.1.0"
+description = "Export compiled binaries as source-like projects for reverse engineering agents."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "ida-domain>=0.5.0",
+  "r2pipe>=1.9.8,<2",
+  "tqdm>=4.66,<5",
+]
+license = "MIT"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Topic :: Security",
+  "Topic :: Software Development :: Disassemblers",
+]
+
+[project.scripts]
+tocode = "tocode.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
