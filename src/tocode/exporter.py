@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+from contextlib import nullcontext
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
@@ -75,6 +76,9 @@ TREE_VERSIONED_IMPORT_RX = re.compile(
 _WORKER_SESSION: Any = None
 _WORKER_ANALYSIS: ProgramAnalysis | None = None
 _WORKER_NAMES: NameBook | None = None
+_TREE_WORKER_ANALYSIS: ProgramAnalysis | None = None
+_TREE_WORKER_RENDERED: dict[int, RenderedFunction] | None = None
+_TREE_WORKER_RAW_RANGES: dict[int, FunctionRange] | None = None
 
 
 @dataclass(slots=True)
@@ -121,6 +125,15 @@ class WorkerSpec:
     idadir: Path | None = None
     ida_domain_path: Path | None = None
     db_path: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TreeBuildJob:
+    index: int
+    cluster: Cluster
+    tree_path: Path
+    raw_path: Path
+    include_path: str
 
 
 def export_binary(
@@ -240,6 +253,7 @@ def _write_raw(context: ExportContext) -> None:
         rendered=context.rendered,
         prototypes=context.prototypes,
         write_support=True,
+        progress=context.progress,
     )
     context.raw_sources = written["sources"]
     context.asm_files = written["asm"]
@@ -250,6 +264,16 @@ def _write_raw(context: ExportContext) -> None:
 
 def _write_tree(context: ExportContext) -> None:
     context.progress.log("write: tree source")
+    worker_count = choose_jobs(
+        function_count=len(context.clusters),
+        analysis_seconds=0.0,
+        requested=context.jobs,
+        backend="tree",
+    )
+    if worker_count > 1:
+        context.progress.log(
+            f"jobs: opening {worker_count} tree workers for {len(context.clusters)} clusters"
+        )
     written = write_tree_sources(
         analysis=_need(context.analysis),
         clusters=context.clusters,
@@ -258,6 +282,8 @@ def _write_tree(context: ExportContext) -> None:
         include_dir=_need(context.include_dir),
         rendered=context.rendered,
         raw_ranges=context.raw_ranges,
+        progress=context.progress,
+        worker_count=worker_count,
     )
     context.tree_sources = written["sources"]
     context.tree_ranges = written["ranges"]
@@ -275,6 +301,7 @@ def write_source_tree(
     rendered: dict[int, RenderedFunction],
     prototypes: dict[int, str],
     write_support: bool,
+    progress: Progress | None = None,
 ) -> dict[str, Any]:
     sources: list[Path] = []
     asm_files: list[Path] = []
@@ -282,33 +309,39 @@ def write_source_tree(
     failures: list[FunctionFailure] = []
     ranges: list[FunctionRange] = []
 
-    for cluster in clusters:
-        c_path = _cluster_path(src_dir, cluster, c_file_name(cluster))
-        asm_path = _cluster_path(asm_dir, cluster, asm_file_name(cluster))
-        summary_path = _cluster_path(summary_dir, cluster, summary_file_name(cluster))
-        c_path.parent.mkdir(parents=True, exist_ok=True)
-        asm_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        include_path = Path(os.path.relpath(include_dir / header_name, c_path.parent)).as_posix()
-        block = build_cluster_files(
-            analysis=analysis,
-            cluster=cluster,
-            header_include=include_path,
-            c_path=c_path,
-            asm_path=asm_path,
-            summary_path=summary_path,
-            rendered=rendered,
-            prototypes=prototypes,
-        )
-        c_path.write_text(block["c"], encoding="utf-8")
-        sources.append(c_path.resolve())
-        ranges.extend(block["ranges"])
-        if write_support:
-            asm_path.write_text(block["asm"], encoding="utf-8")
-            summary_path.write_text(block["summary"], encoding="utf-8")
-            asm_files.append(asm_path.resolve())
-            summaries.append(summary_path.resolve())
-            failures.extend(block["failures"])
+    bar_context = (
+        progress.bar(total=len(clusters), desc="writing raw", unit="cluster") if progress else nullcontext()
+    )
+    with bar_context as bar:
+        for cluster in clusters:
+            c_path = _cluster_path(src_dir, cluster, c_file_name(cluster))
+            asm_path = _cluster_path(asm_dir, cluster, asm_file_name(cluster))
+            summary_path = _cluster_path(summary_dir, cluster, summary_file_name(cluster))
+            c_path.parent.mkdir(parents=True, exist_ok=True)
+            asm_path.parent.mkdir(parents=True, exist_ok=True)
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            include_path = Path(os.path.relpath(include_dir / header_name, c_path.parent)).as_posix()
+            block = build_cluster_files(
+                analysis=analysis,
+                cluster=cluster,
+                header_include=include_path,
+                c_path=c_path,
+                asm_path=asm_path,
+                summary_path=summary_path,
+                rendered=rendered,
+                prototypes=prototypes,
+            )
+            c_path.write_text(block["c"], encoding="utf-8")
+            sources.append(c_path.resolve())
+            ranges.extend(block["ranges"])
+            if write_support:
+                asm_path.write_text(block["asm"], encoding="utf-8")
+                summary_path.write_text(block["summary"], encoding="utf-8")
+                asm_files.append(asm_path.resolve())
+                summaries.append(summary_path.resolve())
+                failures.extend(block["failures"])
+            if bar is not None:
+                bar.update(1)
 
     return {
         "sources": sources,
@@ -328,32 +361,150 @@ def write_tree_sources(
     include_dir: Path,
     rendered: dict[int, RenderedFunction],
     raw_ranges: list[FunctionRange],
+    progress: Progress | None = None,
+    worker_count: int = 1,
 ) -> dict[str, Any]:
     sources: list[Path] = []
     ranges: list[FunctionRange] = []
     raw_range_by_address = {item.address: item for item in raw_ranges}
     tree_header = include_dir / "tocode_tree.h"
     tree_header.write_text(build_tree_header(analysis), encoding="utf-8")
+    jobs = build_tree_jobs(
+        clusters=clusters,
+        src_dir=src_dir,
+        raw_dir=raw_dir,
+        tree_header=tree_header,
+    )
 
-    for cluster in clusters:
+    worker_count = max(1, min(worker_count, len(jobs) or 1))
+    if worker_count > 1:
+        try:
+            return write_tree_sources_parallel(
+                analysis=analysis,
+                jobs=jobs,
+                rendered=rendered,
+                raw_ranges=raw_range_by_address,
+                progress=progress,
+                worker_count=worker_count,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if progress:
+                progress.log(f"warning: tree writer workers failed ({exc}); retrying in-process")
+
+    bar_context = (
+        progress.bar(total=len(jobs), desc="writing tree", unit="cluster") if progress else nullcontext()
+    )
+    with bar_context as bar:
+        for job in jobs:
+            block = build_tree_cluster_file(
+                analysis=analysis,
+                cluster=job.cluster,
+                include_path=job.include_path,
+                tree_path=job.tree_path,
+                raw_path=job.raw_path,
+                rendered=rendered,
+                raw_ranges=raw_range_by_address,
+            )
+            job.tree_path.write_text(block["c"], encoding="utf-8")
+            sources.append(job.tree_path.resolve())
+            ranges.extend(block["ranges"])
+            if bar is not None:
+                bar.update(1)
+
+    return {"sources": sources, "ranges": ranges}
+
+
+def build_tree_jobs(
+    *,
+    clusters: list[Cluster],
+    src_dir: Path,
+    raw_dir: Path,
+    tree_header: Path,
+) -> list[TreeBuildJob]:
+    jobs: list[TreeBuildJob] = []
+    for index, cluster in enumerate(clusters):
         tree_path = _cluster_path(src_dir, cluster, c_file_name(cluster))
         raw_path = _cluster_path(raw_dir, cluster, c_file_name(cluster))
         tree_path.parent.mkdir(parents=True, exist_ok=True)
         include_path = Path(os.path.relpath(tree_header, tree_path.parent)).as_posix()
-        block = build_tree_cluster_file(
-            analysis=analysis,
-            cluster=cluster,
-            include_path=include_path,
-            tree_path=tree_path,
-            raw_path=raw_path,
-            rendered=rendered,
-            raw_ranges=raw_range_by_address,
+        jobs.append(
+            TreeBuildJob(
+                index=index,
+                cluster=cluster,
+                tree_path=tree_path,
+                raw_path=raw_path,
+                include_path=include_path,
+            )
         )
-        tree_path.write_text(block["c"], encoding="utf-8")
-        sources.append(tree_path.resolve())
-        ranges.extend(block["ranges"])
+    return jobs
 
+
+def write_tree_sources_parallel(
+    *,
+    analysis: ProgramAnalysis,
+    jobs: list[TreeBuildJob],
+    rendered: dict[int, RenderedFunction],
+    raw_ranges: dict[int, FunctionRange],
+    progress: Progress | None,
+    worker_count: int,
+) -> dict[str, Any]:
+    results: dict[int, tuple[Path, str, list[FunctionRange]]] = {}
+    ctx = multiprocessing.get_context("spawn")
+    bar_context = (
+        progress.bar(total=len(jobs), desc="writing tree", unit="cluster") if progress else nullcontext()
+    )
+    with bar_context as bar:
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            mp_context=ctx,
+            initializer=_init_tree_worker,
+            initargs=(analysis, rendered, raw_ranges),
+        ) as executor:
+            futures = {executor.submit(_build_tree_in_worker, job): job.index for job in jobs}
+            for future in as_completed(futures):
+                index, tree_path, c_text, cluster_ranges = future.result()
+                results[index] = (tree_path, c_text, cluster_ranges)
+                if bar is not None:
+                    bar.update(1)
+
+    sources: list[Path] = []
+    ranges: list[FunctionRange] = []
+    for index in sorted(results):
+        tree_path, c_text, cluster_ranges = results[index]
+        tree_path.write_text(c_text, encoding="utf-8")
+        sources.append(tree_path.resolve())
+        ranges.extend(cluster_ranges)
     return {"sources": sources, "ranges": ranges}
+
+
+def _init_tree_worker(
+    analysis: ProgramAnalysis,
+    rendered: dict[int, RenderedFunction],
+    raw_ranges: dict[int, FunctionRange],
+) -> None:
+    global _TREE_WORKER_ANALYSIS, _TREE_WORKER_RENDERED, _TREE_WORKER_RAW_RANGES
+    _TREE_WORKER_ANALYSIS = analysis
+    _TREE_WORKER_RENDERED = rendered
+    _TREE_WORKER_RAW_RANGES = raw_ranges
+
+
+def _build_tree_in_worker(job: TreeBuildJob) -> tuple[int, Path, str, list[FunctionRange]]:
+    if (
+        _TREE_WORKER_ANALYSIS is None
+        or _TREE_WORKER_RENDERED is None
+        or _TREE_WORKER_RAW_RANGES is None
+    ):
+        raise RuntimeError("tree writer worker was not initialized")
+    block = build_tree_cluster_file(
+        analysis=_TREE_WORKER_ANALYSIS,
+        cluster=job.cluster,
+        include_path=job.include_path,
+        tree_path=job.tree_path,
+        raw_path=job.raw_path,
+        rendered=_TREE_WORKER_RENDERED,
+        raw_ranges=_TREE_WORKER_RAW_RANGES,
+    )
+    return job.index, job.tree_path, block["c"], block["ranges"]
 
 
 def build_tree_cluster_file(
