@@ -216,14 +216,17 @@ class ProgramAnalysis:
 class ExportSummary:
     root_dir: Path
     raw_src_dir: Path
+    tree_src_dir: Path | None
     include_dir: Path
     header_path: Path
     source_files: list[Path]
+    tree_source_files: list[Path]
     asm_files: list[Path]
     summary_files: list[Path]
     function_count: int
     cluster_count: int
     failed_functions: list[FunctionFailure] = field(default_factory=list)
     function_index_path: Path | None = None
+    tree_function_index_path: Path | None = None
     manifest_path: Path | None = None
     data_dir: Path | None = None

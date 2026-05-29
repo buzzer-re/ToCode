@@ -7,7 +7,7 @@ This repository contains ToCode, a Python-only binary exporter. ToCode takes one
 - Keep the project focused on the exporter CLI and Python library modules.
 - Do not add web UI, server, container wrapper, shortcut, installer, or background service behavior.
 - Do not add chat, report generation, or secondary analysis stages.
-- Export one project tree from one binary: raw decompiler output, assembly, summaries, section data, and JSON metadata.
+- Export one project tree from one binary: scanner-friendly C, raw decompiler output, assembly, summaries, section data, and JSON metadata.
 - Generated export trees must include their own `AGENTS.md` for agents analyzing that exported binary.
 
 ## Project Layout
@@ -27,6 +27,7 @@ This repository contains ToCode, a Python-only binary exporter. ToCode takes one
 The CLI accepts a regular binary file and writes a project directory containing:
 
 - `src/raw/**/*.c`
+- `src/tree/**/*.c`
 - `src/raw/**/*.asm`
 - `src/raw/**/*.summary`
 - `include/*.h`
@@ -34,6 +35,7 @@ The CLI accepts a regular binary file and writes a project directory containing:
 - `data/variables.json`
 - `data/variables_interesting.json`
 - `function-index.json`
+- `function-index-tree.json`
 - `functions.json`
 - `sections.json`
 - `strings.json`

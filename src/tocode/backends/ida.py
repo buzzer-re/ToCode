@@ -80,6 +80,7 @@ class IdaSession:
 
         self._cache_db = None if self.binary.suffix.lower() in _DB_SUFFIXES else resolved_db
         if needs_analysis:
+            self._opened_for_analysis = True
             options = self._Options(
                 auto_analysis=True,
                 new_database=True,
@@ -92,6 +93,7 @@ class IdaSession:
                 raise BackendError(f"failed to open IDA database for {self.binary}") from exc
             self._wait_for_auto_analysis()
         else:
+            self._opened_for_analysis = False
             options = self._Options(auto_analysis=False, new_database=False)
             try:
                 self._db = self._Database.open(str(resolved_db), args=options, save_on_close=False)
@@ -146,17 +148,32 @@ class IdaSession:
 
     def close(self) -> None:
         try:
-            self._db.close(save=False)
+            self._db.close(save=self._opened_for_analysis)
         except Exception:  # noqa: BLE001
             pass
+        finally:
+            self._opened_for_analysis = False
 
     def prepare_parallel_workers(self) -> None:
-        save = getattr(self._db, "save", None)
-        if callable(save):
-            try:
-                save()
-            except Exception:  # noqa: BLE001
-                pass
+        if self._cache_db is None or self._cache_db.exists():
+            return
+        try:
+            self._db.close(save=True)
+        except Exception as exc:  # noqa: BLE001
+            raise BackendError(f"failed to save IDA database at {self._cache_db}") from exc
+        self._opened_for_analysis = False
+        options = self._Options(auto_analysis=False, new_database=False)
+        try:
+            self._db = self._Database.open(str(self._cache_db), args=options, save_on_close=False)
+        except Exception as exc:  # noqa: BLE001
+            raise BackendError(f"failed to reopen IDA database at {self._cache_db}") from exc
+        self._decompiler_ready = False
+        self._disasm_cache.clear()
+        self._decompile_cache.clear()
+        self._summary_cache.clear()
+        self._locals_cache.clear()
+        self._primed.clear()
+        self.ensure_decompiler()
 
     def worker(self) -> "IdaSession":
         if self._cache_db is not None and self._cache_db.exists():

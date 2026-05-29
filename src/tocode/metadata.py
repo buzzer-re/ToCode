@@ -109,14 +109,17 @@ def functions_json(
     ranges: list[FunctionRange],
     prototypes: dict[int, str],
     c_names: dict[int, str],
+    tree_ranges: list[FunctionRange] | None = None,
 ) -> dict[str, object]:
     range_map = {item.address: item for item in ranges}
+    tree_map = {item.address: item for item in (tree_ranges or [])}
     reachable = set(reachable_depths(analysis))
     rows: list[dict[str, object]] = []
     for address, routine in sorted(analysis.routines.items()):
         if routine.imported:
             continue
         raw_range = range_map.get(address)
+        tree_range = tree_map.get(address)
         callees = analysis.callees.get(address, [])
         callers = analysis.callers.get(address, [])
         rows.append(
@@ -139,6 +142,9 @@ def functions_json(
                 "source_file": str(raw_range.c_file) if raw_range else None,
                 "source_line_start": raw_range.c_line_start if raw_range else None,
                 "source_line_end": raw_range.c_line_end if raw_range else None,
+                "tree_source_file": str(tree_range.c_file) if tree_range else None,
+                "tree_source_line_start": tree_range.c_line_start if tree_range else None,
+                "tree_source_line_end": tree_range.c_line_end if tree_range else None,
                 "asm_file": str(raw_range.asm_file) if raw_range else None,
                 "asm_line_start": raw_range.asm_line_start if raw_range else None,
                 "asm_line_end": raw_range.asm_line_end if raw_range else None,

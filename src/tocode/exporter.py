@@ -7,6 +7,9 @@ from dataclasses import dataclass, field
 import multiprocessing
 import os
 from pathlib import Path
+import re
+import shutil
+import tempfile
 from typing import Any
 
 from .analysis import BinaryAnalyzer
@@ -59,6 +62,15 @@ TINY_CLUSTER_BYTES = 0x80
 MERGED_CLUSTER_FUNCTIONS = 12
 MERGED_CLUSTER_BYTES = 0x800
 ASM_STUB_MAX_SIZE = 16
+TREE_CALLING_CONVENTION_RX = re.compile(
+    r"\b__(?:cdecl|fastcall|stdcall|thiscall|usercall|userpurge|noreturn)\b"
+)
+TREE_SPOILS_RX = re.compile(r"\s*__spoils<[^>]*>")
+TREE_SPACE_RX = re.compile(r"[ \t]{2,}")
+TREE_REGISTER_RX = re.compile(r"@<([^>]+)>")
+TREE_VERSIONED_IMPORT_RX = re.compile(
+    r"\b([A-Za-z_]\w*)__(?:GLIBC(?:XX)?|CXXABI)_[0-9][A-Za-z0-9_]*\b"
+)
 
 _WORKER_SESSION: Any = None
 _WORKER_ANALYSIS: ProgramAnalysis | None = None
@@ -71,9 +83,11 @@ class ExportContext:
     progress: Progress
     out_dir: Path | None
     jobs: int | None
+    tree_enabled: bool
     analysis: ProgramAnalysis | None = None
     root: Path | None = None
     raw_dir: Path | None = None
+    tree_dir: Path | None = None
     include_dir: Path | None = None
     data_dir: Path | None = None
     header_name: str = ""
@@ -85,10 +99,13 @@ class ExportContext:
     prototypes: dict[int, str] = field(default_factory=dict)
     failures: list[FunctionFailure] = field(default_factory=list)
     raw_ranges: list[FunctionRange] = field(default_factory=list)
+    tree_ranges: list[FunctionRange] = field(default_factory=list)
     raw_sources: list[Path] = field(default_factory=list)
+    tree_sources: list[Path] = field(default_factory=list)
     asm_files: list[Path] = field(default_factory=list)
     summary_files: list[Path] = field(default_factory=list)
     function_index: Path | None = None
+    tree_index: Path | None = None
     manifest: Path | None = None
     worker_count: int = 1
     requested_jobs: int | None = None
@@ -103,6 +120,7 @@ class WorkerSpec:
     analysis_command: str | None
     idadir: Path | None = None
     ida_domain_path: Path | None = None
+    db_path: Path | None = None
 
 
 def export_binary(
@@ -111,6 +129,7 @@ def export_binary(
     out_dir: Path | None = None,
     progress: Progress | None = None,
     jobs: int | None = None,
+    tree: bool = True,
 ) -> ExportSummary:
     progress = progress or analyzer.progress
     context = ExportContext(
@@ -118,11 +137,14 @@ def export_binary(
         progress=progress,
         out_dir=out_dir,
         jobs=jobs,
+        tree_enabled=tree,
     )
     _prepare_tree(context)
     _cluster(context)
     _render(context)
     _write_raw(context)
+    if tree:
+        _write_tree(context)
     _write_metadata(context)
     return _summary(context)
 
@@ -131,15 +153,19 @@ def _prepare_tree(context: ExportContext) -> None:
     analysis = context.analyzer.analysis or context.analyzer.collect()
     root = _root_dir(analysis.binary.path, context.out_dir)
     raw_dir = root / "src" / "raw"
+    tree_dir = root / "src" / "tree"
     include_dir = root / "include"
     data_dir = root / "data"
     raw_dir.mkdir(parents=True, exist_ok=True)
+    if context.tree_enabled:
+        tree_dir.mkdir(parents=True, exist_ok=True)
     include_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
 
     context.analysis = analysis
     context.root = root
     context.raw_dir = raw_dir
+    context.tree_dir = tree_dir if context.tree_enabled else None
     context.include_dir = include_dir
     context.data_dir = data_dir
     context.header_name = f"{clean_path_component(analysis.binary.path.stem)}.h"
@@ -156,6 +182,8 @@ def _cluster(context: ExportContext) -> None:
     expected: list[Path] = []
     for cluster in context.clusters:
         expected.extend(_expected_paths(_need(context.raw_dir), cluster))
+        if context.tree_enabled:
+            expected.append(_cluster_path(_need(context.tree_dir), cluster, c_file_name(cluster)))
     _remove_stale_sources(src_dir, expected)
 
 
@@ -220,6 +248,21 @@ def _write_raw(context: ExportContext) -> None:
     context.raw_ranges = written["ranges"]
 
 
+def _write_tree(context: ExportContext) -> None:
+    context.progress.log("write: tree source")
+    written = write_tree_sources(
+        analysis=_need(context.analysis),
+        clusters=context.clusters,
+        src_dir=_need(context.tree_dir),
+        raw_dir=_need(context.raw_dir),
+        include_dir=_need(context.include_dir),
+        rendered=context.rendered,
+        raw_ranges=context.raw_ranges,
+    )
+    context.tree_sources = written["sources"]
+    context.tree_ranges = written["ranges"]
+
+
 def write_source_tree(
     *,
     analysis: ProgramAnalysis,
@@ -274,6 +317,86 @@ def write_source_tree(
         "failures": failures,
         "ranges": ranges,
     }
+
+
+def write_tree_sources(
+    *,
+    analysis: ProgramAnalysis,
+    clusters: list[Cluster],
+    src_dir: Path,
+    raw_dir: Path,
+    include_dir: Path,
+    rendered: dict[int, RenderedFunction],
+    raw_ranges: list[FunctionRange],
+) -> dict[str, Any]:
+    sources: list[Path] = []
+    ranges: list[FunctionRange] = []
+    raw_range_by_address = {item.address: item for item in raw_ranges}
+    tree_header = include_dir / "tocode_tree.h"
+    tree_header.write_text(build_tree_header(analysis), encoding="utf-8")
+
+    for cluster in clusters:
+        tree_path = _cluster_path(src_dir, cluster, c_file_name(cluster))
+        raw_path = _cluster_path(raw_dir, cluster, c_file_name(cluster))
+        tree_path.parent.mkdir(parents=True, exist_ok=True)
+        include_path = Path(os.path.relpath(tree_header, tree_path.parent)).as_posix()
+        block = build_tree_cluster_file(
+            analysis=analysis,
+            cluster=cluster,
+            include_path=include_path,
+            tree_path=tree_path,
+            raw_path=raw_path,
+            rendered=rendered,
+            raw_ranges=raw_range_by_address,
+        )
+        tree_path.write_text(block["c"], encoding="utf-8")
+        sources.append(tree_path.resolve())
+        ranges.extend(block["ranges"])
+
+    return {"sources": sources, "ranges": ranges}
+
+
+def build_tree_cluster_file(
+    *,
+    analysis: ProgramAnalysis,
+    cluster: Cluster,
+    include_path: str,
+    tree_path: Path,
+    raw_path: Path,
+    rendered: dict[int, RenderedFunction],
+    raw_ranges: dict[int, FunctionRange],
+) -> dict[str, Any]:
+    c_parts = [_tree_preamble(cluster, include_path)]
+    c_line = next_line(c_parts[0])
+    ranges: list[FunctionRange] = []
+    tree_resolved = tree_path.resolve()
+    raw_resolved = raw_path.resolve()
+
+    for address in cluster.members:
+        routine = analysis.routines[address]
+        item = rendered[address]
+        tree_body = tree_safe_function(item.c_text, fallback_name=item.c_name)
+        metadata = _tree_function_metadata(routine=routine, raw_path=raw_path)
+        body = metadata + tree_body
+        start = c_line
+        end = start + line_count(body) - 1
+        raw_range = raw_ranges.get(address)
+        c_parts.append(body.rstrip() + "\n\n")
+        ranges.append(
+            FunctionRange(
+                address=address,
+                name=routine.name,
+                c_file=tree_resolved,
+                c_line_start=start,
+                c_line_end=end,
+                asm_file=raw_range.asm_file if raw_range is not None else raw_resolved.with_suffix(".asm"),
+                asm_line_start=raw_range.asm_line_start if raw_range is not None else 1,
+                asm_line_end=raw_range.asm_line_end if raw_range is not None else 1,
+            )
+        )
+        c_line = end + 2
+
+    return {"c": "".join(c_parts), "ranges": ranges}
 
 
 def build_cluster_files(
@@ -428,6 +551,7 @@ def _worker_spec(analyzer: BinaryAnalyzer) -> WorkerSpec:
         analysis_command=getattr(session, "analysis_command", None),
         idadir=getattr(session, "idadir", None),
         ida_domain_path=getattr(session, "ida_domain_path", None),
+        db_path=getattr(session, "_cache_db", None),
     )
 
 
@@ -441,7 +565,21 @@ def _init_worker(spec: WorkerSpec, analysis: ProgramAnalysis, names: NameBook) -
 
 def _open_worker(spec: WorkerSpec):
     if spec.backend == "ida":
-        session = IdaSession(spec.binary, idadir=spec.idadir, ida_domain_path=spec.ida_domain_path)
+        worker_db = _copy_worker_database(spec.db_path) if spec.db_path is not None else None
+        try:
+            session = IdaSession(
+                spec.binary,
+                idadir=spec.idadir,
+                ida_domain_path=spec.ida_domain_path,
+                db_path=worker_db,
+                needs_analysis=False if worker_db is not None else None,
+            )
+        except Exception:
+            if worker_db is not None:
+                worker_db.unlink(missing_ok=True)
+            raise
+        if worker_db is not None:
+            setattr(session, "_tocode_worker_db_copy", worker_db)
     elif spec.backend == "r2":
         session = R2Session(spec.binary, analysis_command=spec.analysis_command or "aaa")
         session.analyze()
@@ -451,12 +589,23 @@ def _open_worker(spec: WorkerSpec):
     return session
 
 
+def _copy_worker_database(db_path: Path) -> Path:
+    fd, name = tempfile.mkstemp(prefix="tocode-ida-worker-", suffix=db_path.suffix)
+    os.close(fd)
+    target = Path(name)
+    shutil.copy2(db_path, target)
+    return target
+
+
 def _close_worker() -> None:
     global _WORKER_SESSION
     if _WORKER_SESSION is not None:
+        worker_db = getattr(_WORKER_SESSION, "_tocode_worker_db_copy", None)
         try:
             _WORKER_SESSION.close()
         finally:
+            if worker_db is not None:
+                Path(worker_db).unlink(missing_ok=True)
             _WORKER_SESSION = None
 
 
@@ -624,6 +773,54 @@ def asm_function(routine: Routine, disasm: str) -> str:
     return "\n".join([f"; Function: {routine.name} @ 0x{routine.address:x}", disasm.strip() or "; <no disassembly available>"])
 
 
+def tree_safe_function(source: str, *, fallback_name: str) -> str:
+    text = source.strip()
+    if "{" not in text:
+        return f"tocode_word {clean_c_identifier(fallback_name)}(void)\n{{\n    return 0;\n}}"
+
+    replacements = [
+        ("unsigned __int128", "unsigned long long"),
+        ("signed __int128", "long long"),
+        ("__int128", "long long"),
+        ("unsigned __int64", "unsigned long long"),
+        ("signed __int64", "long long"),
+        ("__int64", "long long"),
+        ("unsigned __int32", "unsigned int"),
+        ("signed __int32", "int"),
+        ("__int32", "int"),
+        ("unsigned __int16", "unsigned short"),
+        ("signed __int16", "short"),
+        ("__int16", "short"),
+        ("unsigned __int8", "unsigned char"),
+        ("signed __int8", "signed char"),
+        ("__int8", "char"),
+        ("_BOOL1", "bool"),
+        ("_BOOL2", "bool"),
+        ("_BOOL4", "bool"),
+        ("_BYTE", "uint8_t"),
+        ("_WORD", "uint16_t"),
+        ("_DWORD", "uint32_t"),
+        ("_QWORD", "uint64_t"),
+    ]
+    for old, new in replacements:
+        text = text.replace(old, new)
+    text = TREE_CALLING_CONVENTION_RX.sub("", text)
+    text = TREE_SPOILS_RX.sub("", text)
+    text = re.sub(r"\b__(?:pure|hidden|unused|noreturn)\b", "", text)
+    text = re.sub(r"\b([0-9]+)i64\b", r"\1LL", text)
+    text = re.sub(r"\b(0x[0-9A-Fa-f]+)i64\b", r"\1LL", text)
+    text = re.sub(r"\b__PAIR\d+__\s*\(", "tocode_pair(", text)
+    text = TREE_REGISTER_RX.sub(_tree_register_name, text)
+    text = TREE_VERSIONED_IMPORT_RX.sub(r"\1", text)
+    text = re.sub(r"\bnullptr\b", "NULL", text)
+    text = TREE_SPACE_RX.sub(" ", text)
+    return text.strip()
+
+
+def _tree_register_name(match: re.Match[str]) -> str:
+    return "_" + clean_c_identifier(match.group(1))
+
+
 def _summary_function(routine: Routine, path: Path, text: str) -> str:
     lines = [
         f"; Function: {routine.name} @ 0x{routine.address:x}",
@@ -642,6 +839,18 @@ def _write_metadata(context: ExportContext) -> None:
     header.write_text(build_header(analysis, context.prototypes, names), encoding="utf-8")
     context.data_variable_count = export_variables(analysis, root, context.raw_ranges)
     context.function_index = write_function_index(root, context.raw_ranges)
+    context.tree_index = (
+        write_function_index(root, context.tree_ranges, file_name="function-index-tree.json")
+        if context.tree_enabled
+        else None
+    )
+    if not context.tree_enabled:
+        stale_tree_index = root / "function-index-tree.json"
+        if stale_tree_index.exists():
+            stale_tree_index.unlink()
+        stale_tree_header = _need(context.include_dir) / "tocode_tree.h"
+        if stale_tree_header.exists():
+            stale_tree_header.unlink()
     stale = root / ("function-index-" + "ll" + "m.json")
     if stale.exists():
         stale.unlink()
@@ -657,6 +866,7 @@ def _write_metadata(context: ExportContext) -> None:
             context.raw_ranges,
             context.prototypes,
             names.functions,
+            tree_ranges=context.tree_ranges,
         ),
     )
     reachable = reachable_json(analysis)
@@ -664,7 +874,10 @@ def _write_metadata(context: ExportContext) -> None:
     write_json(root / "cluster-graph.json", cluster_graph_json(analysis, context.clusters, context.raw_ranges))
     write_json(root / "triage.json", triage_json(analysis, context.clusters, context.raw_ranges, reachable))
     write_project_json(context)
-    (root / "AGENTS.md").write_text(build_export_agents(analysis, context.header_name), encoding="utf-8")
+    (root / "AGENTS.md").write_text(
+        build_export_agents(analysis, context.header_name, tree_enabled=context.tree_enabled),
+        encoding="utf-8",
+    )
     context.manifest = write_manifest(context)
 
 
@@ -717,6 +930,34 @@ def build_header(analysis: ProgramAnalysis, prototypes: dict[int, str], names: N
     return "\n".join(lines)
 
 
+def build_tree_header(analysis: ProgramAnalysis) -> str:
+    default_return = "uint64_t" if analysis.binary.pointer_size >= 8 else "uint32_t"
+    lines = [
+        "#pragma once",
+        "",
+        "#include <stdbool.h>",
+        "#include <stddef.h>",
+        "#include <stdint.h>",
+        "#include <string.h>",
+        "",
+        "typedef uint8_t byte;",
+        "typedef uint16_t word;",
+        "typedef uint32_t dword;",
+        "typedef uint64_t qword;",
+        "typedef uint8_t undefined;",
+        "typedef uint8_t undefined1;",
+        "typedef uint16_t undefined2;",
+        "typedef uint32_t undefined4;",
+        "typedef uint64_t undefined8;",
+        "typedef void (*code)(void);",
+        f"typedef {default_return} tocode_word;",
+        "",
+        "extern uintptr_t tocode_unknown;",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def write_function_index(root: Path, ranges: list[FunctionRange], *, file_name: str = "function-index.json") -> Path:
     path = root / file_name
     write_json(
@@ -757,14 +998,17 @@ def write_project_json(context: ExportContext) -> None:
             "root_dir": str(root.resolve()),
             "src_dir": str(_need(context.raw_dir).resolve()),
             "raw_src_dir": str(_need(context.raw_dir).resolve()),
+            "tree_src_dir": str(context.tree_dir.resolve()) if context.tree_dir is not None else None,
             "include_dir": str(_need(context.include_dir).resolve()),
             "data_dir": str(_need(context.data_dir).resolve()),
             "header": str(_need(context.header_path).resolve()),
             "agents": str((root / "AGENTS.md").resolve()),
             "source_files": [str(item) for item in context.raw_sources],
+            "tree_source_files": [str(item) for item in context.tree_sources],
             "summary_files": [str(item) for item in context.summary_files],
             "asm_files": [str(item) for item in context.asm_files],
             "function_index": str(_need(context.function_index).resolve()),
+            "tree_function_index": str(context.tree_index.resolve()) if context.tree_index is not None else None,
             "function_count": len(context.raw_ranges),
             "cluster_count": len(context.clusters),
             "failure_count": len(context.failures),
@@ -793,10 +1037,13 @@ def write_manifest(context: ExportContext) -> Path:
             "header": str(_need(context.header_path).resolve()),
             "source_files": [str(item) for item in context.raw_sources],
             "raw_source_files": [str(item) for item in context.raw_sources],
+            "tree_source_files": [str(item) for item in context.tree_sources],
             "asm_files": [str(item) for item in context.asm_files],
             "summary_files": [str(item) for item in context.summary_files],
             "function_index": str(_need(context.function_index).resolve()),
+            "tree_function_index": str(context.tree_index.resolve()) if context.tree_index is not None else None,
             "raw_src_dir": str(_need(context.raw_dir).resolve()),
+            "tree_src_dir": str(context.tree_dir.resolve()) if context.tree_dir is not None else None,
             "cluster_count": len(context.clusters),
             "function_count": len(context.raw_ranges),
             "data_variable_count": context.data_variable_count,
@@ -820,7 +1067,7 @@ def write_manifest(context: ExportContext) -> Path:
     return path
 
 
-def build_export_agents(analysis: ProgramAnalysis, header_name: str) -> str:
+def build_export_agents(analysis: ProgramAnalysis, header_name: str, *, tree_enabled: bool = True) -> str:
     section_files = sorted(
         [
             f"`data/{clean_path_component(section.name)}.bin`"
@@ -872,6 +1119,15 @@ def build_export_agents(analysis: ProgramAnalysis, header_name: str) -> str:
         "- Be explicit about uncertainty and unresolved symbols.",
         "",
     ]
+    if tree_enabled:
+        lines.insert(
+            lines.index("- `src/raw/*.summary`: compact function summaries grouped with each clustered source file."),
+            "- `src/tree/*.c`: scanner-friendly C normalized for tree-sitter and Semgrep. Use this for automated source scanning.",
+        )
+        lines.insert(
+            lines.index("- `sections.json`, `strings.json`, and `relocations.json`: layout and reference metadata."),
+            "- `function-index-tree.json`: exact scanner-source line mappings for each exported function.",
+        )
     return "\n".join(lines)
 
 
@@ -1044,6 +1300,18 @@ def _summary_preamble(cluster: Cluster) -> str:
     return "\n".join(lines)
 
 
+def _tree_preamble(cluster: Cluster, include_path: str) -> str:
+    lines = [
+        "/* Generated by ToCode for C parsers and source scanners. */",
+        "/* Scanner source: normalized from src/raw; use raw and ASM for final evidence. */",
+        "/* Cluster: utils */" if cluster.root == SHARED_CLUSTER_ID else f"/* Cluster root: {cluster.label} (0x{cluster.root:x}) */",
+    ]
+    if cluster.summary:
+        lines.append(f"/* Description: {cluster.summary} */")
+    lines.extend([f'#include "{include_path}"', ""])
+    return "\n".join(lines)
+
+
 def _function_metadata(
     *,
     routine: Routine,
@@ -1067,6 +1335,19 @@ def _function_metadata(
             f" * asm_file: {display_path(asm_path)}",
             f" * asm_line_start: {asm_start}",
             f" * asm_line_end: {asm_end}",
+            " */",
+            "",
+        ]
+    )
+
+
+def _tree_function_metadata(*, routine: Routine, raw_path: Path) -> str:
+    return "\n".join(
+        [
+            "/* tocode-tree:",
+            f" * address: 0x{routine.address:x}",
+            f" * original_name: {routine.name}",
+            f" * raw_source: {display_path(raw_path)}",
             " */",
             "",
         ]
@@ -1120,15 +1401,18 @@ def _summary(context: ExportContext) -> ExportSummary:
     return ExportSummary(
         root_dir=_need(context.root).resolve(),
         raw_src_dir=_need(context.raw_dir).resolve(),
+        tree_src_dir=context.tree_dir.resolve() if context.tree_dir is not None else None,
         include_dir=_need(context.include_dir).resolve(),
         header_path=_need(context.header_path).resolve(),
         source_files=context.raw_sources,
+        tree_source_files=context.tree_sources,
         asm_files=context.asm_files,
         summary_files=context.summary_files,
         function_count=len(context.raw_ranges),
         cluster_count=len(context.clusters),
         failed_functions=context.failures,
         function_index_path=_need(context.function_index).resolve(),
+        tree_function_index_path=context.tree_index.resolve() if context.tree_index is not None else None,
         manifest_path=_need(context.manifest).resolve(),
         data_dir=_need(context.data_dir).resolve(),
     )

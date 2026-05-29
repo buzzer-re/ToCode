@@ -1,0 +1,7 @@
+rules:
+  - id: tocode-toy-strcpy
+    languages:
+      - c
+    severity: ERROR
+    message: Unbounded strcpy on recovered source
+    pattern: strcpy(...)
