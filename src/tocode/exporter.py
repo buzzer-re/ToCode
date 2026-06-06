@@ -164,7 +164,7 @@ def export_binary(
 
 def _prepare_tree(context: ExportContext) -> None:
     analysis = context.analyzer.analysis or context.analyzer.collect()
-    root = _root_dir(analysis.binary.path, context.out_dir)
+    root = _root_dir(context.analyzer.binary, context.out_dir)
     raw_dir = root / "src" / "raw"
     tree_dir = root / "src" / "tree"
     include_dir = root / "include"

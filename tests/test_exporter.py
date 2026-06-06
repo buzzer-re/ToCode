@@ -29,10 +29,13 @@ class FakeAnalyzer:
     analysis_seconds = 0.01
 
     def __init__(
-        self, analysis: ProgramAnalysis, database_path: Path | None = None
+        self,
+        analysis: ProgramAnalysis,
+        database_path: Path | None = None,
+        binary_path: Path | None = None,
     ) -> None:
         self.analysis = analysis
-        self.binary = analysis.binary.path
+        self.binary = binary_path or analysis.binary.path
         self.progress = Progress(enabled=False)
         self.session = FakeSession(database_path)
 
@@ -407,6 +410,54 @@ def test_export_binary_can_skip_tree_source(tmp_path: Path) -> None:
     assert not (summary.root_dir / "src" / "tree").exists()
     assert not (summary.root_dir / "include" / "tocode_tree.h").exists()
     assert not (summary.root_dir / "function-index-tree.json").exists()
+
+
+def test_default_output_uses_invoked_binary_path(tmp_path: Path) -> None:
+    invoked_root = tmp_path / "tmp_view"
+    ida_root = tmp_path / "ida_view"
+    invoked_root.mkdir()
+    ida_root.mkdir()
+    invoked_binary = invoked_root / "sample.bin"
+    ida_binary = ida_root / "sample.bin"
+    invoked_binary.write_bytes(b"\x7fELF" + b"\x00" * 256)
+    ida_binary.write_bytes(invoked_binary.read_bytes())
+    analysis = ProgramAnalysis(
+        binary=BinaryFacts(
+            path=ida_binary,
+            arch="x86",
+            bits=64,
+            image_base=0x1000,
+            os_name="linux",
+            format_name="elf",
+            file_type="EXEC",
+            entrypoints=[0x1000],
+        ),
+        segments=[Segment(".text", 128, 128, "PROGBITS", "r-x", 0, 0x1000)],
+        routines={
+            0x1000: Routine(
+                0x1000, "main", 48, "int main(void)", None, False, 0, 0, 0, 0, 0
+            ),
+        },
+        imports={},
+        exports=[],
+        symbols=[],
+        relocations=[],
+        strings=[],
+        flags=[],
+        callees={0x1000: []},
+        callers={0x1000: []},
+        import_calls={0x1000: []},
+        roots=[0x1000],
+        thunks=set(),
+    )
+
+    summary = export_binary(
+        FakeAnalyzer(analysis, binary_path=invoked_binary),  # type: ignore[arg-type]
+        progress=Progress(enabled=False),
+        jobs=None,
+    )
+
+    assert summary.root_dir == (invoked_root / "sample_decompiler").resolve()
 
 
 def test_tree_safe_function_preserves_scanner_calls() -> None:
