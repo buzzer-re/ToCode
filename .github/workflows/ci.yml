@@ -45,7 +45,7 @@ jobs:
         uses: astral-sh/setup-uv@v6
 
       - name: Type check
-        run: uv run --with mypy==2.1.0 --with tomli==2.4.1 --with types-tqdm python -m mypy src tests --pretty
+        run: uv run --with mypy==2.1.0 --with tomli==2.4.1 --with types-tqdm --with 'pytest>=8,<9' python -m mypy src tests --pretty
 
   test:
     name: Pytest

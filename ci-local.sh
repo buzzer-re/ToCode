@@ -177,7 +177,7 @@ else
 fi
 
 info "[3/5] Mypy"
-if run_with mypy==2.1.0 --with tomli==2.4.1 --with types-tqdm python -m mypy \
+if run_with mypy==2.1.0 --with tomli==2.4.1 --with types-tqdm --with 'pytest>=8,<9' python -m mypy \
   src tests --pretty; then
   ok "mypy"
 else

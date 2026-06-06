@@ -91,7 +91,7 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 Write-Step "[3/5] Mypy"
-Invoke-With -Packages @("mypy==2.1.0", "tomli==2.4.1", "types-tqdm") python -m mypy src tests --pretty
+Invoke-With -Packages @("mypy==2.1.0", "tomli==2.4.1", "types-tqdm", "pytest>=8,<9") python -m mypy src tests --pretty
 if ($LASTEXITCODE -eq 0) {
     Add-Pass "mypy"
 } else {
