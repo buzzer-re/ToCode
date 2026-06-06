@@ -2,10 +2,6 @@
 
 ToCode exports a binary or IDA database into a source-like project tree: raw recovered C, matching assembly, function summaries, section data, optional IDA database, and metadata that coding agents can read directly.
 
-```bash
-tocode ./sample.bin -o ./sample_decompiler
-```
-
 ## Why
 
 AI models are strong at coding, especially when they can traverse large codebases and accumulate context with subagents and other strategies. When we use these agents to assist with reverse engineering, we usually provide tools through MCP or other means so the coding agent can learn and build strategies around tools such as IDA and r2. This approach adds limitations and constraints to how the agent behaves, and it increases the need for deep, complex reasoning.
