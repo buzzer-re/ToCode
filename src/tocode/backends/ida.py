@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .base import bootstrap_ida, is_ida_database
+from .base import BackendName, bootstrap_ida, is_ida_database
 from ..errors import BackendError
 
 
@@ -40,7 +40,7 @@ def _database_path(binary: Path) -> tuple[Path, bool]:
 
 
 class IdaSession:
-    backend_name = "ida"
+    backend_name: BackendName = "ida"
     backend_label = "IDA Domain"
     decompiler_label = "Hex-Rays"
     analysis_command: str | None = None

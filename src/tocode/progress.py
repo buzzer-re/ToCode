@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import sys
-from typing import Iterator
+from typing import Any, Iterator, Protocol
 
+_tqdm_module: Any
 try:  # pragma: no cover - dependency presence is covered by CLI/export tests.
-    from tqdm import tqdm
+    import tqdm as _loaded_tqdm_module
 except ImportError:  # pragma: no cover
-    tqdm = None
+    _tqdm_module = None
+else:
+    _tqdm_module = _loaded_tqdm_module
+
+_tqdm: Any = getattr(_tqdm_module, "tqdm", None)
 
 
 class _NullProgress:
@@ -16,6 +21,12 @@ class _NullProgress:
 
     def close(self) -> None:
         return
+
+
+class ProgressBar(Protocol):
+    def update(self, value: int = 1) -> object: ...
+
+    def close(self) -> None: ...
 
 
 class Progress:
@@ -27,11 +38,14 @@ class Progress:
             print(message, file=sys.stderr)
 
     @contextmanager
-    def bar(self, *, total: int, desc: str, unit: str) -> Iterator[object]:
-        if not self.enabled or tqdm is None:
+    def bar(self, *, total: int, desc: str, unit: str) -> Iterator[ProgressBar]:
+        tqdm_factory: Any = _tqdm
+        if not self.enabled or tqdm_factory is None:
             yield _NullProgress()
             return
-        bar = tqdm(total=total, desc=desc, unit=unit, leave=False, dynamic_ncols=True)
+        bar = tqdm_factory(
+            total=total, desc=desc, unit=unit, leave=False, dynamic_ncols=True
+        )
         try:
             yield bar
         finally:

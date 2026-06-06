@@ -240,8 +240,8 @@ class BinaryAnalyzer:
         routines: dict[int, Routine],
         imports: dict[int, ImportEntry],
     ) -> tuple[dict[int, list[int]], dict[int, list[int]], dict[int, list[str]]]:
-        callees = {address: [] for address in routines}
-        callers = {address: [] for address in routines}
+        callees: dict[int, list[int]] = {address: [] for address in routines}
+        callers: dict[int, list[int]] = {address: [] for address in routines}
         import_calls: dict[int, list[str]] = {address: [] for address in routines}
         for address, routine in routines.items():
             if routine.imported:

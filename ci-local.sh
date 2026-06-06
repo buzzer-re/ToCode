@@ -138,6 +138,7 @@ if [[ -z "$UV_BIN" ]]; then
     ruff==0.15.13 \
     mypy==2.1.0 \
     tomli==2.4.1 \
+    types-tqdm \
     'pytest>=8,<9' || {
     fail "tool bootstrap" "pip install failed"
     echo "Could not install CI tools"
@@ -175,9 +176,9 @@ else
   fi
 fi
 
-info "[3/5] Mypy focused core"
-if run_with mypy==2.1.0 --with tomli==2.4.1 python -m mypy \
-  src/tocode/cluster.py src/tocode/parallel.py src/tocode/schema.py tests/test_algorithms.py --pretty; then
+info "[3/5] Mypy"
+if run_with mypy==2.1.0 --with tomli==2.4.1 --with types-tqdm python -m mypy \
+  src tests --pretty; then
   ok "mypy"
 else
   fail "mypy" "see output above"

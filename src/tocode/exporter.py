@@ -766,6 +766,7 @@ def _init_worker(spec: WorkerSpec, analysis: ProgramAnalysis, names: NameBook) -
 
 
 def _open_worker(spec: WorkerSpec):
+    session: Any
     if spec.backend == "ida":
         worker_db = (
             _copy_worker_database(spec.db_path) if spec.db_path is not None else None

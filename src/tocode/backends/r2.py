@@ -4,22 +4,23 @@ from pathlib import Path
 from typing import Any
 
 try:
-    import r2pipe
+    import r2pipe  # type: ignore[import-untyped]
 except ImportError:  # pragma: no cover
     r2pipe = None
 
+from .base import BackendName
 from ..errors import BackendError, BackendJsonError
 
 
 class R2Session:
-    backend_name = "r2"
+    backend_name: BackendName = "r2"
     backend_label = "radare2"
     decompiler_label = "r2ghidra"
     parallel_safe = True
 
     def __init__(self, binary: Path, *, analysis_command: str = "aaa") -> None:
         self.binary = Path(binary).resolve()
-        self.analysis_command = analysis_command
+        self.analysis_command: str | None = analysis_command
         if r2pipe is None:
             raise BackendError("python package r2pipe is not installed")
         try:
@@ -47,7 +48,7 @@ class R2Session:
         self.cmd("e anal.types.constraint=true")
 
     def analyze(self) -> None:
-        self.cmd(self.analysis_command)
+        self.cmd(self.analysis_command or "aaa")
 
     def close(self) -> None:
         try:

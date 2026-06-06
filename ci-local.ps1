@@ -90,8 +90,8 @@ if ($LASTEXITCODE -eq 0) {
     Add-Fail "ruff lint" "see output above"
 }
 
-Write-Step "[3/5] Mypy focused core"
-Invoke-With -Packages @("mypy==2.1.0", "tomli==2.4.1") python -m mypy src/tocode/cluster.py src/tocode/parallel.py src/tocode/schema.py tests/test_algorithms.py --pretty
+Write-Step "[3/5] Mypy"
+Invoke-With -Packages @("mypy==2.1.0", "tomli==2.4.1", "types-tqdm") python -m mypy src tests --pretty
 if ($LASTEXITCODE -eq 0) {
     Add-Pass "mypy"
 } else {

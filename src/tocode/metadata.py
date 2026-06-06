@@ -4,9 +4,10 @@ from collections import deque
 import math
 from pathlib import Path
 import re
+from typing import Any
 
 from .naming import SHARED_CLUSTER_ID, c_file_name, clean_path_component
-from .schema import Cluster, FunctionRange, ProgramAnalysis, Segment
+from .schema import Cluster, FunctionRange, ProgramAnalysis, Segment, StringEntry
 
 
 def display_path(path: Path) -> str:
@@ -251,6 +252,7 @@ def triage_json(
     ranges: list[FunctionRange],
     reachable_doc: dict[str, object],
 ) -> dict[str, object]:
+    reachable_rows = reachable_doc.get("reachable", [])
     return {
         "binary_type": binary_type(analysis),
         "arch": analysis.binary.arch,
@@ -263,7 +265,9 @@ def triage_json(
         "export_count": len(analysis.exports),
         "import_count": len(analysis.imports),
         "strings_of_interest": interesting_strings(analysis)[:50],
-        "reachable_count": len(reachable_doc.get("reachable", [])),
+        "reachable_count": len(reachable_rows)
+        if isinstance(reachable_rows, list)
+        else 0,
         "unreachable_count": reachable_doc.get("unreachable_count", 0),
     }
 
@@ -362,89 +366,93 @@ def variables_document(
     def unique(base: str, address: int) -> str:
         return base if base not in variables else f"{base}_{address:x}"
 
-    for item in analysis.strings:
-        segment = containing(item.vaddr)
+    for string in analysis.strings:
+        segment = containing(string.vaddr)
         if segment is None:
             continue
         label = unique(
-            f"str_{clean_path_component(item.value[:32] or f'{item.vaddr:x}')}_{item.vaddr:x}",
-            item.vaddr,
+            f"str_{clean_path_component(string.value[:32] or f'{string.vaddr:x}')}_{string.vaddr:x}",
+            string.vaddr,
         )
         variables[label] = {
             "section": segment.name,
-            "offset": item.vaddr - segment.vaddr,
-            "size": item.size,
-            "end": item.vaddr - segment.vaddr + item.size,
-            "va": f"0x{item.vaddr:x}",
-            "type": "char[]" if item.kind == "ascii" else "wchar_t[]",
-            "string_type": item.kind,
-            "value": item.value,
+            "offset": string.vaddr - segment.vaddr,
+            "size": string.size,
+            "end": string.vaddr - segment.vaddr + string.size,
+            "va": f"0x{string.vaddr:x}",
+            "type": "char[]" if string.kind == "ascii" else "wchar_t[]",
+            "string_type": string.kind,
+            "value": string.value,
         }
-        seen.add(item.vaddr)
+        seen.add(string.vaddr)
 
-    for item in analysis.symbols:
-        if item.imported or item.vaddr in seen or item.kind == "FUNC":
+    for symbol in analysis.symbols:
+        if symbol.imported or symbol.vaddr in seen or symbol.kind == "FUNC":
             continue
-        segment = containing(item.vaddr)
+        segment = containing(symbol.vaddr)
         if segment is None:
             continue
-        label = unique(clean_path_component(item.real_name or item.name), item.vaddr)
+        label = unique(
+            clean_path_component(symbol.real_name or symbol.name), symbol.vaddr
+        )
         variables[label] = {
             "section": segment.name,
-            "offset": item.vaddr - segment.vaddr,
-            "size": item.size,
-            "end": item.vaddr - segment.vaddr + item.size,
-            "va": f"0x{item.vaddr:x}",
-            "type": "uint8_t" if item.size == 1 else "uint8_t[]",
-            "symbol_type": item.kind,
+            "offset": symbol.vaddr - segment.vaddr,
+            "size": symbol.size,
+            "end": symbol.vaddr - segment.vaddr + symbol.size,
+            "va": f"0x{symbol.vaddr:x}",
+            "type": "uint8_t" if symbol.size == 1 else "uint8_t[]",
+            "symbol_type": symbol.kind,
         }
-        seen.add(item.vaddr)
+        seen.add(symbol.vaddr)
 
-    for item in analysis.relocations:
-        if item.vaddr in seen:
+    for relocation in analysis.relocations:
+        if relocation.vaddr in seen:
             continue
-        segment = containing(item.vaddr)
+        segment = containing(relocation.vaddr)
         if segment is None:
             continue
-        label = unique(f"reloc_{clean_path_component(item.name)}", item.vaddr)
+        label = unique(
+            f"reloc_{clean_path_component(relocation.name)}", relocation.vaddr
+        )
         variables[label] = {
             "section": segment.name,
-            "offset": item.vaddr - segment.vaddr,
+            "offset": relocation.vaddr - segment.vaddr,
             "size": analysis.binary.pointer_size,
-            "end": item.vaddr - segment.vaddr + analysis.binary.pointer_size,
-            "va": f"0x{item.vaddr:x}",
+            "end": relocation.vaddr - segment.vaddr + analysis.binary.pointer_size,
+            "va": f"0x{relocation.vaddr:x}",
             "type": "void*",
-            "relocation_type": item.kind,
+            "relocation_type": relocation.kind,
         }
-        seen.add(item.vaddr)
+        seen.add(relocation.vaddr)
 
-    for item in analysis.flags:
-        if item.offset in seen or not item.name.startswith(
+    for flag in analysis.flags:
+        if flag.offset in seen or not flag.name.startswith(
             ("obj.", "data.", "str.", "reloc.", "vtable.")
         ):
             continue
-        segment = containing(item.offset)
+        segment = containing(flag.offset)
         if segment is None:
             continue
-        label = unique(clean_path_component(item.real_name or item.name), item.offset)
+        label = unique(clean_path_component(flag.real_name or flag.name), flag.offset)
         variables[label] = {
             "section": segment.name,
-            "offset": item.offset - segment.vaddr,
-            "size": item.size,
-            "end": item.offset - segment.vaddr + item.size,
-            "va": f"0x{item.offset:x}",
-            "type": "uint8_t[]" if item.size != 1 else "uint8_t",
-            "flag": item.name,
+            "offset": flag.offset - segment.vaddr,
+            "size": flag.size,
+            "end": flag.offset - segment.vaddr + flag.size,
+            "va": f"0x{flag.offset:x}",
+            "type": "uint8_t[]" if flag.size != 1 else "uint8_t",
+            "flag": flag.name,
         }
-        seen.add(item.offset)
+        seen.add(flag.offset)
 
     add_variable_xrefs(variables, ranges)
     return dict(sorted(variables.items()))
 
 
-def source_lines(ranges: list[FunctionRange]) -> list[dict[str, object]]:
+def source_lines(ranges: list[FunctionRange]) -> list[dict[str, Any]]:
     cache: dict[Path, list[str]] = {}
-    rows: list[dict[str, object]] = []
+    rows: list[dict[str, Any]] = []
     for item in ranges:
         if item.c_file not in cache:
             try:
@@ -469,7 +477,7 @@ def source_lines(ranges: list[FunctionRange]) -> list[dict[str, object]]:
 
 
 def string_xrefs(
-    strings: list, ranges: list[FunctionRange]
+    strings: list[StringEntry], ranges: list[FunctionRange]
 ) -> dict[int, list[dict[str, object]]]:
     lines = source_lines(ranges)
     result: dict[int, list[dict[str, object]]] = {}
@@ -546,7 +554,7 @@ def interesting_variables(
     known_strings = {item.value for item in analysis.strings}
     result: dict[str, dict[str, object]] = {}
     for name, variable in variables.items():
-        size = int(variable.get("size", 0) or 0)
+        size = _int_value(variable.get("size"), 0)
         type_name = str(variable.get("type", ""))
         xrefs = variable.get("xrefs")
         xref_rows = xrefs if isinstance(xrefs, list) else []
@@ -629,7 +637,7 @@ def looks_forwarded(value: str) -> bool:
 def triage_sections(
     analysis: ProgramAnalysis, *, rwx_only: bool = False
 ) -> list[dict[str, object]]:
-    rows = []
+    rows: list[dict[str, object]] = []
     for item in analysis.segments:
         rwx = item.readable and item.writable and item.executable
         if rwx_only and not rwx:
@@ -644,6 +652,15 @@ def triage_sections(
             }
         )
     return rows
+
+
+def _int_value(value: object, default: int = 0) -> int:
+    if not isinstance(value, str | bytes | bytearray | int | float):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def binary_type(analysis: ProgramAnalysis) -> str:

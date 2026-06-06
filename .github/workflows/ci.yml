@@ -41,11 +41,11 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install deps
-        run: pip install mypy==2.1.0 tomli==2.4.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
 
-      - name: Type check focused core
-        run: python -m mypy src/tocode/cluster.py src/tocode/parallel.py src/tocode/schema.py tests/test_algorithms.py --pretty
+      - name: Type check
+        run: uv run --with mypy==2.1.0 --with tomli==2.4.1 --with types-tqdm python -m mypy src tests --pretty
 
   test:
     name: Pytest

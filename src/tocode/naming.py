@@ -115,33 +115,44 @@ def build_name_book(analysis: ProgramAnalysis) -> NameBook:
         function_names[address] = c_name
         _alias(aliases, c_name, routine.name)
 
-    for address, item in sorted(analysis.imports.items()):
-        c_name = allocator.claim(item.name, f"imp_{address:x}")
+    for address, imported in sorted(analysis.imports.items()):
+        c_name = allocator.claim(imported.name, f"imp_{address:x}")
         import_names[address] = c_name
         _alias(
-            aliases, c_name, item.name, f"sym.imp.{item.name}", f"loc.imp.{item.name}"
+            aliases,
+            c_name,
+            imported.name,
+            f"sym.imp.{imported.name}",
+            f"loc.imp.{imported.name}",
         )
 
-    for item in sorted(analysis.symbols, key=lambda s: (s.vaddr, s.name, s.flag_name)):
-        c_name = function_names.get(item.vaddr) or import_names.get(item.vaddr)
-        if c_name is None:
+    for symbol in sorted(
+        analysis.symbols, key=lambda s: (s.vaddr, s.name, s.flag_name)
+    ):
+        existing = function_names.get(symbol.vaddr) or import_names.get(symbol.vaddr)
+        if existing is None:
             c_name = allocator.claim(
-                item.flag_name or item.real_name or item.name, f"sym_{item.vaddr:x}"
+                symbol.flag_name or symbol.real_name or symbol.name,
+                f"sym_{symbol.vaddr:x}",
             )
-        _alias(aliases, c_name, item.name, item.flag_name, item.real_name)
+        else:
+            c_name = existing
+        _alias(aliases, c_name, symbol.name, symbol.flag_name, symbol.real_name)
 
-    for item in sorted(analysis.relocations, key=lambda r: (r.vaddr, r.name)):
-        raw = item.name or f"reloc_{item.vaddr:x}"
-        c_name = allocator.claim(f"reloc_{raw}", f"reloc_{item.vaddr:x}")
+    for relocation in sorted(analysis.relocations, key=lambda r: (r.vaddr, r.name)):
+        raw = relocation.name or f"reloc_{relocation.vaddr:x}"
+        c_name = allocator.claim(f"reloc_{raw}", f"reloc_{relocation.vaddr:x}")
         _alias(aliases, c_name, raw, f"reloc.{raw}")
 
-    for item in sorted(analysis.flags, key=lambda f: (f.offset, f.name)):
-        c_name = function_names.get(item.offset) or import_names.get(item.offset)
-        if c_name is None:
+    for flag in sorted(analysis.flags, key=lambda f: (f.offset, f.name)):
+        existing = function_names.get(flag.offset) or import_names.get(flag.offset)
+        if existing is None:
             c_name = allocator.claim(
-                item.name or item.real_name, f"flag_{item.offset:x}"
+                flag.name or flag.real_name, f"flag_{flag.offset:x}"
             )
-        _alias(aliases, c_name, item.name, item.real_name)
+        else:
+            c_name = existing
+        _alias(aliases, c_name, flag.name, flag.real_name)
 
     return NameBook(function_names, import_names, aliases)
 
