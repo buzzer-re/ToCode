@@ -1,0 +1,177 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, dev]
+  push:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install ruff
+        run: pip install ruff==0.15.13
+
+      - name: Format check
+        run: python -m ruff format --check src tests
+
+      - name: Lint
+        run: python -m ruff check src tests
+
+  typecheck:
+    name: Mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install mypy==2.1.0 tomli==2.4.1
+
+      - name: Type check focused core
+        run: python -m mypy src/tocode/cluster.py src/tocode/parallel.py src/tocode/schema.py tests/test_algorithms.py --pretty
+
+  test:
+    name: Pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Run tests
+        run: uv run --extra dev pytest -q
+
+      - name: Compile Python
+        run: python -m compileall src tests
+
+  quality:
+    name: Desloppify
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install desloppify
+        run: pip install desloppify==0.9.3
+
+      - name: Run objective scan
+        run: desloppify scan --profile objective --no-badge
+
+      - name: Score regression report
+        run: |
+          python -c "
+          import json
+          import sys
+
+          try:
+              data = json.load(open('.desloppify/query.json'))
+              score = float(data.get('objective_score', 0))
+          except Exception:
+              print('Could not read desloppify score; advisory only')
+              sys.exit(0)
+
+          BASELINE = 89.0
+          TOLERANCE = 0.5
+
+          if score < BASELINE - TOLERANCE:
+              print(f'Advisory: objective score {score}/100 below baseline {BASELINE} (tolerance {TOLERANCE})')
+          else:
+              print(f'OK: objective score {score}/100 (baseline {BASELINE})')
+          "
+
+      - name: Get changed Python files
+        if: github.event_name == 'pull_request'
+        id: changed
+        run: |
+          git diff --name-only origin/${{ github.base_ref }}...HEAD -- '*.py' > /tmp/changed_files.txt
+          echo "Changed files:"
+          cat /tmp/changed_files.txt
+
+      - name: Report security findings in changed files
+        if: github.event_name == 'pull_request'
+        run: |
+          python -c "
+          import json
+          import subprocess
+          import sys
+
+          changed = [line.strip() for line in open('/tmp/changed_files.txt') if line.strip()]
+          if not changed:
+              print('No Python files changed; skipping security report')
+              sys.exit(0)
+
+          findings = []
+          for path in changed:
+              subprocess.run(
+                  ['desloppify', 'show', path, '--output', '/tmp/file_findings.json', '--status', 'open'],
+                  capture_output=True,
+              )
+              try:
+                  data = json.load(open('/tmp/file_findings.json'))
+              except (json.JSONDecodeError, FileNotFoundError):
+                  continue
+              file_findings = data if isinstance(data, list) else data.get('findings', [])
+              findings.extend(file_findings)
+
+          security = [item for item in findings if item.get('detector') == 'security']
+          other = [item for item in findings if item.get('detector') != 'security']
+
+          for item in security:
+              print(f\"SECURITY: {item.get('file')} - {item.get('message', item.get('id', '?'))}\")
+          for item in other[:5]:
+              print(f\"  {item.get('detector')}: {item.get('file')} - {item.get('message', item.get('id', '?'))}\")
+
+          print(f'Advisory: {len(security)} security and {len(other)} non-security finding(s) in changed files')
+          "
+
+  gate:
+    name: CI Gate
+    if: always()
+    needs: [lint, typecheck, test, quality]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        run: |
+          echo "lint:      ${{ needs.lint.result }}"
+          echo "typecheck: ${{ needs.typecheck.result }}"
+          echo "test:      ${{ needs.test.result }}"
+          echo "quality:   ${{ needs.quality.result }} (advisory)"
+
+          if [[ "${{ needs.lint.result }}" != "success" ]] ||
+             [[ "${{ needs.typecheck.result }}" != "success" ]] ||
+             [[ "${{ needs.test.result }}" != "success" ]]; then
+            echo "::error::One or more required CI jobs failed"
+            exit 1
+          fi
+
+          echo "Required checks passed"

@@ -24,25 +24,31 @@ def test_cluster_routines_groups_shared_callees() -> None:
 
 
 def test_choose_jobs_caps_auto_ida_parallelism() -> None:
-    assert choose_jobs(
-        function_count=300,
-        analysis_seconds=0.2,
-        requested=None,
-        backend="ida",
-        cpu_count=32,
-        job_limit=64,
-    ) == 4
+    assert (
+        choose_jobs(
+            function_count=300,
+            analysis_seconds=0.2,
+            requested=None,
+            backend="ida",
+            cpu_count=32,
+            job_limit=64,
+        )
+        == 4
+    )
 
 
 def test_requested_jobs_are_limited_by_function_count() -> None:
-    assert choose_jobs(
-        function_count=3,
-        analysis_seconds=0.1,
-        requested=8,
-        backend="ida",
-        cpu_count=16,
-        job_limit=16,
-    ) == 3
+    assert (
+        choose_jobs(
+            function_count=3,
+            analysis_seconds=0.1,
+            requested=8,
+            backend="ida",
+            cpu_count=16,
+            job_limit=16,
+        )
+        == 3
+    )
 
 
 def test_name_sanitizers_are_c_and_path_safe() -> None:

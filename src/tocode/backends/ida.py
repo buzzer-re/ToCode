@@ -57,8 +57,12 @@ class IdaSession:
     ) -> None:
         self.binary = Path(binary).resolve()
         self.idadir = idadir.resolve() if idadir is not None else None
-        self.ida_domain_path = ida_domain_path.resolve() if ida_domain_path is not None else None
-        runtime = bootstrap_ida(idadir=self.idadir, ida_domain_path=self.ida_domain_path)
+        self.ida_domain_path = (
+            ida_domain_path.resolve() if ida_domain_path is not None else None
+        )
+        runtime = bootstrap_ida(
+            idadir=self.idadir, ida_domain_path=self.ida_domain_path
+        )
         self._Database = runtime.ida_domain.Database
         self._Options = runtime.ida_domain.database.IdaCommandOptions
 
@@ -88,17 +92,25 @@ class IdaSession:
                 plugin_options="lumina:host=0.0.0.0 -Osecondary_lumina:host=0.0.0.0",
             )
             try:
-                self._db = self._Database.open(str(self.binary), args=options, save_on_close=True)
+                self._db = self._Database.open(
+                    str(self.binary), args=options, save_on_close=True
+                )
             except Exception as exc:  # noqa: BLE001
-                raise BackendError(f"failed to open IDA database for {self.binary}") from exc
+                raise BackendError(
+                    f"failed to open IDA database for {self.binary}"
+                ) from exc
             self._wait_for_auto_analysis()
         else:
             self._opened_for_analysis = False
             options = self._Options(auto_analysis=False, new_database=False)
             try:
-                self._db = self._Database.open(str(resolved_db), args=options, save_on_close=False)
+                self._db = self._Database.open(
+                    str(resolved_db), args=options, save_on_close=False
+                )
             except Exception as exc:  # noqa: BLE001
-                raise BackendError(f"failed to open IDA database at {resolved_db}") from exc
+                raise BackendError(
+                    f"failed to open IDA database at {resolved_db}"
+                ) from exc
 
         self._strings_ready = False
         self._decompiler_ready = False
@@ -174,13 +186,19 @@ class IdaSession:
         try:
             self._db.close(save=True)
         except Exception as exc:  # noqa: BLE001
-            raise BackendError(f"failed to save IDA database at {self._cache_db}") from exc
+            raise BackendError(
+                f"failed to save IDA database at {self._cache_db}"
+            ) from exc
         self._opened_for_analysis = False
         options = self._Options(auto_analysis=False, new_database=False)
         try:
-            self._db = self._Database.open(str(self._cache_db), args=options, save_on_close=False)
+            self._db = self._Database.open(
+                str(self._cache_db), args=options, save_on_close=False
+            )
         except Exception as exc:  # noqa: BLE001
-            raise BackendError(f"failed to reopen IDA database at {self._cache_db}") from exc
+            raise BackendError(
+                f"failed to reopen IDA database at {self._cache_db}"
+            ) from exc
         self._decompiler_ready = False
         self._disasm_cache.clear()
         self._decompile_cache.clear()
@@ -198,7 +216,9 @@ class IdaSession:
                 db_path=self._cache_db,
                 needs_analysis=False,
             )
-        return IdaSession(self.binary, idadir=self.idadir, ida_domain_path=self.ida_domain_path)
+        return IdaSession(
+            self.binary, idadir=self.idadir, ida_domain_path=self.ida_domain_path
+        )
 
     def ensure_decompiler(self) -> None:
         if self._decompiler_ready:
@@ -231,7 +251,11 @@ class IdaSession:
 
     def entries(self) -> list[dict[str, Any]]:
         return [
-            {"ordinal": int(entry.ordinal), "name": entry.name, "vaddr": int(entry.address)}
+            {
+                "ordinal": int(entry.ordinal),
+                "name": entry.name,
+                "vaddr": int(entry.address),
+            }
             for entry in self._db.entries
         ]
 
@@ -284,9 +308,13 @@ class IdaSession:
             try:
                 ordinal = int(self._ida_entry.get_entry_ordinal(index))
                 address = int(self._ida_entry.get_entry(ordinal))
-                name = self._ida_entry.get_entry_name(ordinal) or self._db.names.get_at(address)
+                name = self._ida_entry.get_entry_name(ordinal) or self._db.names.get_at(
+                    address
+                )
                 get_forwarder = getattr(self._ida_entry, "get_entry_forwarder", None)
-                forwarder = get_forwarder(ordinal) if get_forwarder is not None else None
+                forwarder = (
+                    get_forwarder(ordinal) if get_forwarder is not None else None
+                )
             except Exception:  # noqa: BLE001
                 continue
             rows.append(
@@ -413,7 +441,9 @@ class IdaSession:
                     "indegree": 0,
                     "is_library": is_library,
                     "is_thunk": is_thunk,
-                    "source_kind": self._classify(name, segment_name, is_library=is_library, is_thunk=is_thunk),
+                    "source_kind": self._classify(
+                        name, segment_name, is_library=is_library, is_thunk=is_thunk
+                    ),
                 }
             )
         return rows
@@ -429,14 +459,18 @@ class IdaSession:
             self.ensure_decompiler()
             func = self._need_function(address)
             lines = self._function_pseudocode(func)
-            self._decompile_cache[address] = "\n".join(lines) if isinstance(lines, list) else str(lines)
+            self._decompile_cache[address] = (
+                "\n".join(lines) if isinstance(lines, list) else str(lines)
+            )
         return self._decompile_cache[address]
 
     def function_summary(self, address: int) -> str:
         if address in self._summary_cache:
             return self._summary_cache[address]
         func = self._need_function(address)
-        signature = self._db.functions.get_signature(func) or self._db.functions.get_name(func)
+        signature = self._db.functions.get_signature(
+            func
+        ) or self._db.functions.get_name(func)
         callers = self._db.functions.get_callers(func)
         callees = self._db.functions.get_callees(func)
         locals_count = Counter(
@@ -463,7 +497,9 @@ class IdaSession:
         self._summary_cache[address] = "\n".join(lines)
         return self._summary_cache[address]
 
-    def calls_from(self, address: int, imports, functions) -> tuple[list[int], list[str]]:
+    def calls_from(
+        self, address: int, imports, functions
+    ) -> tuple[list[int], list[str]]:
         func = self._db.functions.get_at(address)
         if func is None:
             return [], []
@@ -522,17 +558,28 @@ class IdaSession:
     def _locals(self, address: int) -> list[Any]:
         if address not in self._locals_cache:
             try:
-                self._locals_cache[address] = list(self._db.functions.get_local_variables(self._need_function(address)))
+                self._locals_cache[address] = list(
+                    self._db.functions.get_local_variables(self._need_function(address))
+                )
             except Exception:  # noqa: BLE001
                 self._locals_cache[address] = []
         return self._locals_cache[address]
 
-    def _classify(self, name: str, segment_name: str | None, *, is_library: bool, is_thunk: bool) -> str:
+    def _classify(
+        self, name: str, segment_name: str | None, *, is_library: bool, is_thunk: bool
+    ) -> str:
         if is_thunk:
             return "thunk"
         lowered_name = (name or "").lower()
         lowered_segment = (segment_name or "").lower()
-        if lowered_segment in {".init", ".fini", ".plt", ".plt.sec", ".init_array", ".fini_array"}:
+        if lowered_segment in {
+            ".init",
+            ".fini",
+            ".plt",
+            ".plt.sec",
+            ".init_array",
+            ".fini_array",
+        }:
             return "runtime"
         if lowered_name in {
             "_init",
@@ -545,7 +592,9 @@ class IdaSession:
             "__do_global_dtors_aux",
         }:
             return "runtime"
-        if lowered_name.startswith(("__libc_csu_", "__scrt_", "_scrt_", "__crt", "_crt", "_global__sub_i_")):
+        if lowered_name.startswith(
+            ("__libc_csu_", "__scrt_", "_scrt_", "__crt", "_crt", "_global__sub_i_")
+        ):
             return "runtime"
         if is_library:
             return "library"

@@ -191,12 +191,16 @@ def _cluster(context: ExportContext) -> None:
     src_dir = _need(context.root) / "src"
     clusters = _build_clusters(analysis, context.analyzer)
     context.clusters = [cluster for cluster in clusters if cluster.members]
-    context.addresses = [address for cluster in context.clusters for address in cluster.members]
+    context.addresses = [
+        address for cluster in context.clusters for address in cluster.members
+    ]
     expected: list[Path] = []
     for cluster in context.clusters:
         expected.extend(_expected_paths(_need(context.raw_dir), cluster))
         if context.tree_enabled:
-            expected.append(_cluster_path(_need(context.tree_dir), cluster, c_file_name(cluster)))
+            expected.append(
+                _cluster_path(_need(context.tree_dir), cluster, c_file_name(cluster))
+            )
     _remove_stale_sources(src_dir, expected)
 
 
@@ -225,7 +229,9 @@ def _render(context: ExportContext) -> None:
     else:
         context.worker_count = 1
         context.render_mode = "single"
-        context.progress.log(f"Rendering with one {context.analyzer.backend_label} session")
+        context.progress.log(
+            f"Rendering with one {context.analyzer.backend_label} session"
+        )
 
     context.progress.log(
         f"Rendering {count} functions in {len(context.clusters)} clusters with {context.analyzer.decompiler_label}"
@@ -310,17 +316,23 @@ def write_source_tree(
     ranges: list[FunctionRange] = []
 
     bar_context = (
-        progress.bar(total=len(clusters), desc="writing raw", unit="cluster") if progress else nullcontext()
+        progress.bar(total=len(clusters), desc="writing raw", unit="cluster")
+        if progress
+        else nullcontext()
     )
     with bar_context as bar:
         for cluster in clusters:
             c_path = _cluster_path(src_dir, cluster, c_file_name(cluster))
             asm_path = _cluster_path(asm_dir, cluster, asm_file_name(cluster))
-            summary_path = _cluster_path(summary_dir, cluster, summary_file_name(cluster))
+            summary_path = _cluster_path(
+                summary_dir, cluster, summary_file_name(cluster)
+            )
             c_path.parent.mkdir(parents=True, exist_ok=True)
             asm_path.parent.mkdir(parents=True, exist_ok=True)
             summary_path.parent.mkdir(parents=True, exist_ok=True)
-            include_path = Path(os.path.relpath(include_dir / header_name, c_path.parent)).as_posix()
+            include_path = Path(
+                os.path.relpath(include_dir / header_name, c_path.parent)
+            ).as_posix()
             block = build_cluster_files(
                 analysis=analysis,
                 cluster=cluster,
@@ -389,10 +401,14 @@ def write_tree_sources(
             )
         except Exception as exc:  # noqa: BLE001
             if progress:
-                progress.log(f"Warning: tree writer workers failed ({exc}); retrying in-process")
+                progress.log(
+                    f"Warning: tree writer workers failed ({exc}); retrying in-process"
+                )
 
     bar_context = (
-        progress.bar(total=len(jobs), desc="writing tree", unit="cluster") if progress else nullcontext()
+        progress.bar(total=len(jobs), desc="writing tree", unit="cluster")
+        if progress
+        else nullcontext()
     )
     with bar_context as bar:
         for job in jobs:
@@ -451,7 +467,9 @@ def write_tree_sources_parallel(
     results: dict[int, tuple[Path, str, list[FunctionRange]]] = {}
     ctx = multiprocessing.get_context("spawn")
     bar_context = (
-        progress.bar(total=len(jobs), desc="writing tree", unit="cluster") if progress else nullcontext()
+        progress.bar(total=len(jobs), desc="writing tree", unit="cluster")
+        if progress
+        else nullcontext()
     )
     with bar_context as bar:
         with ProcessPoolExecutor(
@@ -460,7 +478,9 @@ def write_tree_sources_parallel(
             initializer=_init_tree_worker,
             initargs=(analysis, rendered, raw_ranges),
         ) as executor:
-            futures = {executor.submit(_build_tree_in_worker, job): job.index for job in jobs}
+            futures = {
+                executor.submit(_build_tree_in_worker, job): job.index for job in jobs
+            }
             for future in as_completed(futures):
                 index, tree_path, c_text, cluster_ranges = future.result()
                 results[index] = (tree_path, c_text, cluster_ranges)
@@ -488,7 +508,9 @@ def _init_tree_worker(
     _TREE_WORKER_RAW_RANGES = raw_ranges
 
 
-def _build_tree_in_worker(job: TreeBuildJob) -> tuple[int, Path, str, list[FunctionRange]]:
+def _build_tree_in_worker(
+    job: TreeBuildJob,
+) -> tuple[int, Path, str, list[FunctionRange]]:
     if (
         _TREE_WORKER_ANALYSIS is None
         or _TREE_WORKER_RENDERED is None
@@ -540,7 +562,9 @@ def build_tree_cluster_file(
                 c_file=tree_resolved,
                 c_line_start=start,
                 c_line_end=end,
-                asm_file=raw_range.asm_file if raw_range is not None else raw_resolved.with_suffix(".asm"),
+                asm_file=raw_range.asm_file
+                if raw_range is not None
+                else raw_resolved.with_suffix(".asm"),
                 asm_line_start=raw_range.asm_line_start if raw_range is not None else 1,
                 asm_line_end=raw_range.asm_line_end if raw_range is not None else 1,
             )
@@ -605,7 +629,10 @@ def build_cluster_files(
         body = metadata + item.c_text
         c_parts.append(body.rstrip() + "\n\n")
         asm_parts.append(item.asm_text.rstrip() + "\n\n")
-        summary_parts.append(_summary_function(routine, summary_path, item.summary_text).rstrip() + "\n\n")
+        summary_parts.append(
+            _summary_function(routine, summary_path, item.summary_text).rstrip()
+            + "\n\n"
+        )
         ranges.append(
             FunctionRange(
                 address=address,
@@ -621,7 +648,13 @@ def build_cluster_files(
         c_line = c_end + 2
         asm_line = asm_end + 2
 
-    return {"c": "".join(c_parts), "asm": "".join(asm_parts), "summary": "".join(summary_parts), "ranges": ranges, "failures": failures}
+    return {
+        "c": "".join(c_parts),
+        "asm": "".join(asm_parts),
+        "summary": "".join(summary_parts),
+        "ranges": ranges,
+        "failures": failures,
+    }
 
 
 def render_functions(
@@ -636,9 +669,13 @@ def render_functions(
     if worker_count <= 1:
         return _render_serial(analyzer, analysis, addresses, names, progress)
     try:
-        return _render_parallel(analyzer, analysis, addresses, names, progress, worker_count)
+        return _render_parallel(
+            analyzer, analysis, addresses, names, progress, worker_count
+        )
     except Exception as exc:  # noqa: BLE001
-        progress.log(f"Warning: parallel export failed ({exc}); retrying with the primary session")
+        progress.log(
+            f"Warning: parallel export failed ({exc}); retrying with the primary session"
+        )
         return _render_serial(analyzer, analysis, addresses, names, progress)
 
 
@@ -652,7 +689,9 @@ def _render_serial(
     output: dict[int, RenderedFunction] = {}
     with progress.bar(total=len(addresses), desc="exporting", unit="func") as bar:
         for address in addresses:
-            output[address] = render_one(analyzer, analysis, analysis.routines[address], names)
+            output[address] = render_one(
+                analyzer, analysis, analysis.routines[address], names
+            )
             bar.update(1)
     return output
 
@@ -679,7 +718,10 @@ def _render_parallel(
                 initializer=_init_worker,
                 initargs=(spec, analysis, names),
             ) as executor:
-                futures = {executor.submit(_render_in_worker, address): address for address in addresses}
+                futures = {
+                    executor.submit(_render_in_worker, address): address
+                    for address in addresses
+                }
                 for future in as_completed(futures):
                     address = futures[future]
                     result_address, result = future.result()
@@ -687,7 +729,9 @@ def _render_parallel(
                     pending.discard(address)
                     bar.update(1)
         except BrokenProcessPool as exc:
-            progress.log(f"Warning: worker process exited unexpectedly ({exc}); retrying remaining functions")
+            progress.log(
+                f"Warning: worker process exited unexpectedly ({exc}); retrying remaining functions"
+            )
         for address in sorted(pending, key=addresses.index):
             output[address] = _render_isolated(spec, analysis, address, names)
             bar.update(1)
@@ -723,7 +767,9 @@ def _init_worker(spec: WorkerSpec, analysis: ProgramAnalysis, names: NameBook) -
 
 def _open_worker(spec: WorkerSpec):
     if spec.backend == "ida":
-        worker_db = _copy_worker_database(spec.db_path) if spec.db_path is not None else None
+        worker_db = (
+            _copy_worker_database(spec.db_path) if spec.db_path is not None else None
+        )
         try:
             session = IdaSession(
                 spec.binary,
@@ -739,7 +785,9 @@ def _open_worker(spec: WorkerSpec):
         if worker_db is not None:
             setattr(session, "_tocode_worker_db_copy", worker_db)
     elif spec.backend == "r2":
-        session = R2Session(spec.binary, analysis_command=spec.analysis_command or "aaa")
+        session = R2Session(
+            spec.binary, analysis_command=spec.analysis_command or "aaa"
+        )
         session.analyze()
     else:
         raise RuntimeError(f"unsupported backend for worker: {spec.backend}")
@@ -771,7 +819,9 @@ def _render_in_worker(address: int) -> tuple[int, RenderedFunction]:
     if _WORKER_SESSION is None or _WORKER_ANALYSIS is None or _WORKER_NAMES is None:
         raise RuntimeError("render worker was not initialized")
     routine = _WORKER_ANALYSIS.routines[address]
-    return address, render_one(_WORKER_SESSION, _WORKER_ANALYSIS, routine, _WORKER_NAMES)
+    return address, render_one(
+        _WORKER_SESSION, _WORKER_ANALYSIS, routine, _WORKER_NAMES
+    )
 
 
 def _render_isolated(
@@ -794,7 +844,9 @@ def _render_isolated(
         return _failure_stub(analysis, address, names, exc)
 
 
-def render_one(session_like, analysis: ProgramAnalysis, routine: Routine, names: NameBook) -> RenderedFunction:
+def render_one(
+    session_like, analysis: ProgramAnalysis, routine: Routine, names: NameBook
+) -> RenderedFunction:
     try:
         disasm = session_like.disasm(routine.address).rstrip()
         summary = session_like.function_summary(routine.address).rstrip()
@@ -805,7 +857,9 @@ def render_one(session_like, analysis: ProgramAnalysis, routine: Routine, names:
             source = normalize_source(session_like.decompile(routine.address), names)
             if not source:
                 raise RuntimeError("decompiler returned empty output")
-            prototype = extract_prototype(source) or fallback_prototype(routine, analysis.binary.pointer_size, names)
+            prototype = extract_prototype(source) or fallback_prototype(
+                routine, analysis.binary.pointer_size, names
+            )
             c_text = annotate_source(source, routine)
         failure = None
     except Exception as exc:  # noqa: BLE001
@@ -847,7 +901,9 @@ def _failure_stub(
 def fallback_prototype(routine: Routine, pointer_size: int, names: NameBook) -> str:
     signature = (routine.signature or "").strip().rstrip(";")
     function_name = names.function_name(routine.address, routine.name)
-    parsed = parse_signature(signature, fallback_name=function_name) if signature else None
+    parsed = (
+        parse_signature(signature, fallback_name=function_name) if signature else None
+    )
     if parsed is not None:
         return parsed
     default = "undefined8" if pointer_size >= 8 else "undefined4"
@@ -888,7 +944,9 @@ def extract_prototype(source: str) -> str | None:
     before, sep, _after = source.partition("{")
     if not sep:
         return None
-    text = " ".join(line.strip() for line in before.splitlines() if line.strip()).strip()
+    text = " ".join(
+        line.strip() for line in before.splitlines() if line.strip()
+    ).strip()
     return text or None
 
 
@@ -933,7 +991,12 @@ def failure_stub(routine: Routine, prototype: str) -> str:
 
 
 def asm_function(routine: Routine, disasm: str) -> str:
-    return "\n".join([f"; Function: {routine.name} @ 0x{routine.address:x}", disasm.strip() or "; <no disassembly available>"])
+    return "\n".join(
+        [
+            f"; Function: {routine.name} @ 0x{routine.address:x}",
+            disasm.strip() or "; <no disassembly available>",
+        ]
+    )
 
 
 def tree_safe_function(source: str, *, fallback_name: str) -> str:
@@ -999,11 +1062,15 @@ def _write_metadata(context: ExportContext) -> None:
     root = _need(context.root)
     header = _need(context.header_path)
     names = _need(context.names)
-    header.write_text(build_header(analysis, context.prototypes, names), encoding="utf-8")
+    header.write_text(
+        build_header(analysis, context.prototypes, names), encoding="utf-8"
+    )
     context.data_variable_count = export_variables(analysis, root, context.raw_ranges)
     context.function_index = write_function_index(root, context.raw_ranges)
     context.tree_index = (
-        write_function_index(root, context.tree_ranges, file_name="function-index-tree.json")
+        write_function_index(
+            root, context.tree_ranges, file_name="function-index-tree.json"
+        )
         if context.tree_enabled
         else None
     )
@@ -1034,12 +1101,20 @@ def _write_metadata(context: ExportContext) -> None:
     )
     reachable = reachable_json(analysis)
     write_json(root / "reachable.json", reachable)
-    write_json(root / "cluster-graph.json", cluster_graph_json(analysis, context.clusters, context.raw_ranges))
-    write_json(root / "triage.json", triage_json(analysis, context.clusters, context.raw_ranges, reachable))
+    write_json(
+        root / "cluster-graph.json",
+        cluster_graph_json(analysis, context.clusters, context.raw_ranges),
+    )
+    write_json(
+        root / "triage.json",
+        triage_json(analysis, context.clusters, context.raw_ranges, reachable),
+    )
     context.ida_database = publish_backend_database(context)
     write_project_json(context)
     (root / "AGENTS.md").write_text(
-        build_export_agents(analysis, context.header_name, tree_enabled=context.tree_enabled),
+        build_export_agents(
+            analysis, context.header_name, tree_enabled=context.tree_enabled
+        ),
         encoding="utf-8",
     )
     (root / "CLAUDE.md").write_text("@./AGENTS.md\n", encoding="utf-8")
@@ -1064,7 +1139,9 @@ def publish_backend_database(context: ExportContext) -> Path | None:
     return target.resolve()
 
 
-def build_header(analysis: ProgramAnalysis, prototypes: dict[int, str], names: NameBook) -> str:
+def build_header(
+    analysis: ProgramAnalysis, prototypes: dict[int, str], names: NameBook
+) -> str:
     lines = [
         "#pragma once",
         "",
@@ -1141,7 +1218,9 @@ def build_tree_header(analysis: ProgramAnalysis) -> str:
     return "\n".join(lines)
 
 
-def write_function_index(root: Path, ranges: list[FunctionRange], *, file_name: str = "function-index.json") -> Path:
+def write_function_index(
+    root: Path, ranges: list[FunctionRange], *, file_name: str = "function-index.json"
+) -> Path:
     path = root / file_name
     write_json(
         path,
@@ -1181,23 +1260,31 @@ def write_project_json(context: ExportContext) -> None:
             "root_dir": str(root.resolve()),
             "src_dir": str(_need(context.raw_dir).resolve()),
             "raw_src_dir": str(_need(context.raw_dir).resolve()),
-            "tree_src_dir": str(context.tree_dir.resolve()) if context.tree_dir is not None else None,
+            "tree_src_dir": str(context.tree_dir.resolve())
+            if context.tree_dir is not None
+            else None,
             "include_dir": str(_need(context.include_dir).resolve()),
             "data_dir": str(_need(context.data_dir).resolve()),
             "header": str(_need(context.header_path).resolve()),
             "agents": str((root / "AGENTS.md").resolve()),
             "claude": str((root / "CLAUDE.md").resolve()),
-            "ida_database": str(context.ida_database) if context.ida_database is not None else None,
+            "ida_database": str(context.ida_database)
+            if context.ida_database is not None
+            else None,
             "source_files": [str(item) for item in context.raw_sources],
             "tree_source_files": [str(item) for item in context.tree_sources],
             "summary_files": [str(item) for item in context.summary_files],
             "asm_files": [str(item) for item in context.asm_files],
             "function_index": str(_need(context.function_index).resolve()),
-            "tree_function_index": str(context.tree_index.resolve()) if context.tree_index is not None else None,
+            "tree_function_index": str(context.tree_index.resolve())
+            if context.tree_index is not None
+            else None,
             "function_count": len(context.raw_ranges),
             "cluster_count": len(context.clusters),
             "failure_count": len(context.failures),
-            "requested_worker_count": context.requested_jobs if context.requested_jobs is not None else "auto",
+            "requested_worker_count": context.requested_jobs
+            if context.requested_jobs is not None
+            else "auto",
             "worker_count": context.worker_count,
             "parallel_mode": context.render_mode,
         },
@@ -1220,21 +1307,29 @@ def write_manifest(context: ExportContext) -> Path:
             "bits": analysis.binary.bits,
             "entrypoints": [f"0x{item:x}" for item in analysis.binary.entrypoints],
             "header": str(_need(context.header_path).resolve()),
-            "ida_database": str(context.ida_database) if context.ida_database is not None else None,
+            "ida_database": str(context.ida_database)
+            if context.ida_database is not None
+            else None,
             "source_files": [str(item) for item in context.raw_sources],
             "raw_source_files": [str(item) for item in context.raw_sources],
             "tree_source_files": [str(item) for item in context.tree_sources],
             "asm_files": [str(item) for item in context.asm_files],
             "summary_files": [str(item) for item in context.summary_files],
             "function_index": str(_need(context.function_index).resolve()),
-            "tree_function_index": str(context.tree_index.resolve()) if context.tree_index is not None else None,
+            "tree_function_index": str(context.tree_index.resolve())
+            if context.tree_index is not None
+            else None,
             "raw_src_dir": str(_need(context.raw_dir).resolve()),
-            "tree_src_dir": str(context.tree_dir.resolve()) if context.tree_dir is not None else None,
+            "tree_src_dir": str(context.tree_dir.resolve())
+            if context.tree_dir is not None
+            else None,
             "cluster_count": len(context.clusters),
             "function_count": len(context.raw_ranges),
             "data_variable_count": context.data_variable_count,
             "failure_count": len(context.failures),
-            "requested_worker_count": context.requested_jobs if context.requested_jobs is not None else "auto",
+            "requested_worker_count": context.requested_jobs
+            if context.requested_jobs is not None
+            else "auto",
             "worker_count": context.worker_count,
             "parallel_mode": context.render_mode,
             "agents": str((root / "AGENTS.md").resolve()),
@@ -1244,9 +1339,15 @@ def write_manifest(context: ExportContext) -> Path:
             "exports": str((root / "exports.json").resolve()),
             "reachable": str((root / "reachable.json").resolve()),
             "cluster_graph": str((root / "cluster-graph.json").resolve()),
-            "variables_interesting": str((root / "data" / "variables_interesting.json").resolve()),
+            "variables_interesting": str(
+                (root / "data" / "variables_interesting.json").resolve()
+            ),
             "failures": [
-                {"address": f"0x{item.address:x}", "name": item.name, "error": item.message}
+                {
+                    "address": f"0x{item.address:x}",
+                    "name": item.name,
+                    "error": item.message,
+                }
                 for item in context.failures
             ],
         },
@@ -1254,7 +1355,9 @@ def write_manifest(context: ExportContext) -> Path:
     return path
 
 
-def build_export_agents(analysis: ProgramAnalysis, header_name: str, *, tree_enabled: bool = True) -> str:
+def build_export_agents(
+    analysis: ProgramAnalysis, header_name: str, *, tree_enabled: bool = True
+) -> str:
     section_files = sorted(
         [
             f"`data/{clean_path_component(section.name)}.bin`"
@@ -1311,17 +1414,23 @@ def build_export_agents(analysis: ProgramAnalysis, header_name: str, *, tree_ena
     ]
     if tree_enabled:
         lines.insert(
-            lines.index("- `src/raw/*.summary`: compact function summaries grouped with each clustered source file."),
+            lines.index(
+                "- `src/raw/*.summary`: compact function summaries grouped with each clustered source file."
+            ),
             "- `src/tree/*.c`: scanner-friendly C normalized for tree-sitter and Semgrep. Use this for automated source scanning.",
         )
         lines.insert(
-            lines.index("- `sections.json`, `strings.json`, and `relocations.json`: layout and reference metadata."),
+            lines.index(
+                "- `sections.json`, `strings.json`, and `relocations.json`: layout and reference metadata."
+            ),
             "- `function-index-tree.json`: exact scanner-source line mappings for each exported function.",
         )
     return "\n".join(lines)
 
 
-def _build_clusters(analysis: ProgramAnalysis, analyzer: BinaryAnalyzer) -> list[Cluster]:
+def _build_clusters(
+    analysis: ProgramAnalysis, analyzer: BinaryAnalyzer
+) -> list[Cluster]:
     app = analysis.app_routines()
     if len(app) >= FAST_CLUSTER_FUNCTIONS:
         clusters = _fast_clusters(analysis)
@@ -1347,12 +1456,18 @@ def _build_clusters(analysis: ProgramAnalysis, analyzer: BinaryAnalyzer) -> list
 def _fast_clusters(analysis: ProgramAnalysis) -> list[Cluster]:
     by_segment: dict[str, list[int]] = {}
     for routine in analysis.app_routines():
-        by_segment.setdefault(clean_path_component(routine.segment or "misc"), []).append(routine.address)
+        by_segment.setdefault(
+            clean_path_component(routine.segment or "misc"), []
+        ).append(routine.address)
     clusters: list[Cluster] = []
     for segment, members in sorted(by_segment.items()):
         members.sort()
         for index, chunk in enumerate(_chunks(members, MAX_FUNCTIONS_PER_FILE)):
-            label = segment if len(members) <= MAX_FUNCTIONS_PER_FILE else f"{segment}_{index}"
+            label = (
+                segment
+                if len(members) <= MAX_FUNCTIONS_PER_FILE
+                else f"{segment}_{index}"
+            )
             clusters.append(
                 Cluster(
                     root=chunk[0],
@@ -1389,7 +1504,9 @@ def _support_clusters(analysis: ProgramAnalysis) -> list[Cluster]:
     return clusters
 
 
-def _normalize_clusters(analysis: ProgramAnalysis, clusters: list[Cluster]) -> list[Cluster]:
+def _normalize_clusters(
+    analysis: ProgramAnalysis, clusters: list[Cluster]
+) -> list[Cluster]:
     split: list[Cluster] = []
     for cluster in clusters:
         if len(cluster.members) <= MAX_FUNCTIONS_PER_FILE:
@@ -1400,7 +1517,9 @@ def _normalize_clusters(analysis: ProgramAnalysis, clusters: list[Cluster]) -> l
                 Cluster(
                     root=chunk[0],
                     label=f"{cluster.label}_{index}",
-                    summary=f"{cluster.summary} (part {index + 1})" if cluster.summary else "",
+                    summary=f"{cluster.summary} (part {index + 1})"
+                    if cluster.summary
+                    else "",
                     members=list(chunk),
                     folder=cluster.folder,
                 )
@@ -1408,13 +1527,19 @@ def _normalize_clusters(analysis: ProgramAnalysis, clusters: list[Cluster]) -> l
     return _coalesce_small(analysis, split)
 
 
-def _coalesce_small(analysis: ProgramAnalysis, clusters: list[Cluster]) -> list[Cluster]:
+def _coalesce_small(
+    analysis: ProgramAnalysis, clusters: list[Cluster]
+) -> list[Cluster]:
     output: list[Cluster] = []
     pending: list[int] = []
     pending_root: int | None = None
     pending_bytes = 0
     for cluster in clusters:
-        size = sum(max(analysis.routines[address].size, 1) for address in cluster.members if address in analysis.routines)
+        size = sum(
+            max(analysis.routines[address].size, 1)
+            for address in cluster.members
+            if address in analysis.routines
+        )
         mergeable = (
             cluster.root != SHARED_CLUSTER_ID
             and len(cluster.members) <= TINY_CLUSTER_FUNCTIONS
@@ -1460,7 +1585,9 @@ def _flush_small(output: list[Cluster], members: list[int], root: int | None) ->
 def _c_preamble(cluster: Cluster, header_include: str) -> str:
     lines = [
         "/* Generated by ToCode. */",
-        "/* Cluster: utils */" if cluster.root == SHARED_CLUSTER_ID else f"/* Cluster root: {cluster.label} (0x{cluster.root:x}) */",
+        "/* Cluster: utils */"
+        if cluster.root == SHARED_CLUSTER_ID
+        else f"/* Cluster root: {cluster.label} (0x{cluster.root:x}) */",
     ]
     if cluster.summary:
         lines.append(f"/* Description: {cluster.summary} */")
@@ -1471,7 +1598,9 @@ def _c_preamble(cluster: Cluster, header_include: str) -> str:
 def _asm_preamble(cluster: Cluster) -> str:
     lines = [
         "; Generated by ToCode.",
-        "; Cluster: utils" if cluster.root == SHARED_CLUSTER_ID else f"; Cluster root: {cluster.label} (0x{cluster.root:x})",
+        "; Cluster: utils"
+        if cluster.root == SHARED_CLUSTER_ID
+        else f"; Cluster root: {cluster.label} (0x{cluster.root:x})",
     ]
     if cluster.summary:
         lines.append(f"; Description: {cluster.summary}")
@@ -1482,7 +1611,9 @@ def _asm_preamble(cluster: Cluster) -> str:
 def _summary_preamble(cluster: Cluster) -> str:
     lines = [
         "; Generated by ToCode.",
-        "; Cluster: utils" if cluster.root == SHARED_CLUSTER_ID else f"; Cluster root: {cluster.label} (0x{cluster.root:x})",
+        "; Cluster: utils"
+        if cluster.root == SHARED_CLUSTER_ID
+        else f"; Cluster root: {cluster.label} (0x{cluster.root:x})",
     ]
     if cluster.summary:
         lines.append(f"; Description: {cluster.summary}")
@@ -1494,7 +1625,9 @@ def _tree_preamble(cluster: Cluster, include_path: str) -> str:
     lines = [
         "/* Generated by ToCode for C parsers and source scanners. */",
         "/* Scanner source: normalized from src/raw; use raw and ASM for final evidence. */",
-        "/* Cluster: utils */" if cluster.root == SHARED_CLUSTER_ID else f"/* Cluster root: {cluster.label} (0x{cluster.root:x}) */",
+        "/* Cluster: utils */"
+        if cluster.root == SHARED_CLUSTER_ID
+        else f"/* Cluster root: {cluster.label} (0x{cluster.root:x}) */",
     ]
     if cluster.summary:
         lines.append(f"/* Description: {cluster.summary} */")
@@ -1547,10 +1680,14 @@ def _tree_function_metadata(*, routine: Routine, raw_path: Path) -> str:
 def _root_dir(binary: Path, out_dir: Path | None) -> Path:
     if out_dir is not None:
         path = Path(out_dir).expanduser()
-        return path.resolve() if path.is_absolute() else (binary.parent / path).resolve()
+        return (
+            path.resolve() if path.is_absolute() else (binary.parent / path).resolve()
+        )
     default_root = os.environ.get("TOCODE_DEFAULT_OUT_ROOT", "").strip()
     if default_root:
-        return (Path(default_root).expanduser().resolve() / default_output_name(binary)).resolve()
+        return (
+            Path(default_root).expanduser().resolve() / default_output_name(binary)
+        ).resolve()
     return (binary.parent / default_output_name(binary)).resolve()
 
 
@@ -1571,7 +1708,11 @@ def _remove_stale_sources(src_dir: Path, expected: list[Path]) -> None:
     if not src_dir.exists():
         return
     for path in src_dir.rglob("*"):
-        if path.is_file() and path.suffix in {".c", ".asm", ".summary"} and path.resolve() not in allowed:
+        if (
+            path.is_file()
+            and path.suffix in {".c", ".asm", ".summary"}
+            and path.resolve() not in allowed
+        ):
             path.unlink()
     _remove_empty_dirs(src_dir)
 
@@ -1591,7 +1732,9 @@ def _summary(context: ExportContext) -> ExportSummary:
     return ExportSummary(
         root_dir=_need(context.root).resolve(),
         raw_src_dir=_need(context.raw_dir).resolve(),
-        tree_src_dir=context.tree_dir.resolve() if context.tree_dir is not None else None,
+        tree_src_dir=context.tree_dir.resolve()
+        if context.tree_dir is not None
+        else None,
         include_dir=_need(context.include_dir).resolve(),
         header_path=_need(context.header_path).resolve(),
         source_files=context.raw_sources,
@@ -1602,7 +1745,9 @@ def _summary(context: ExportContext) -> ExportSummary:
         cluster_count=len(context.clusters),
         failed_functions=context.failures,
         function_index_path=_need(context.function_index).resolve(),
-        tree_function_index_path=context.tree_index.resolve() if context.tree_index is not None else None,
+        tree_function_index_path=context.tree_index.resolve()
+        if context.tree_index is not None
+        else None,
         manifest_path=_need(context.manifest).resolve(),
         data_dir=_need(context.data_dir).resolve(),
     )

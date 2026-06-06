@@ -55,7 +55,9 @@ class DecompilerSession(Protocol):
 
     def ensure_decompiler(self) -> None: ...
 
-    def calls_from(self, address: int, imports: dict[int, Any], functions: dict[int, Any]) -> tuple[list[int], list[str]]: ...
+    def calls_from(
+        self, address: int, imports: dict[int, Any], functions: dict[int, Any]
+    ) -> tuple[list[int], list[str]]: ...
 
 
 @dataclass(slots=True)
@@ -111,17 +113,28 @@ class IdaRuntime:
     ida_domain_path: Path | None
 
 
-def probe_ida(*, idadir: Path | None = None, ida_domain_path: Path | None = None) -> IdaProbe:
+def probe_ida(
+    *, idadir: Path | None = None, ida_domain_path: Path | None = None
+) -> IdaProbe:
     try:
         runtime = bootstrap_ida(idadir=idadir, ida_domain_path=ida_domain_path)
     except ToCodeError as exc:
         return IdaProbe(False, str(exc))
     if runtime.idadir is not None:
-        return IdaProbe(True, f"ida-domain available via IDADIR={runtime.idadir}", runtime.idadir, runtime.ida_domain_path)
-    return IdaProbe(True, "ida-domain importable", runtime.idadir, runtime.ida_domain_path)
+        return IdaProbe(
+            True,
+            f"ida-domain available via IDADIR={runtime.idadir}",
+            runtime.idadir,
+            runtime.ida_domain_path,
+        )
+    return IdaProbe(
+        True, "ida-domain importable", runtime.idadir, runtime.ida_domain_path
+    )
 
 
-def bootstrap_ida(*, idadir: Path | None = None, ida_domain_path: Path | None = None) -> IdaRuntime:
+def bootstrap_ida(
+    *, idadir: Path | None = None, ida_domain_path: Path | None = None
+) -> IdaRuntime:
     resolved_idadir = discover_idadir(idadir)
     if resolved_idadir is not None:
         os.environ.setdefault("IDADIR", str(resolved_idadir))
@@ -133,14 +146,23 @@ def bootstrap_ida(*, idadir: Path | None = None, ida_domain_path: Path | None = 
     try:
         idapro = importlib.import_module("idapro")
     except ImportError as exc:
-        raise ToCodeError("unable to import idapro; pass --idadir or install IDA Python support") from exc
+        raise ToCodeError(
+            "unable to import idapro; pass --idadir or install IDA Python support"
+        ) from exc
 
     try:
         ida_domain = importlib.import_module("ida_domain")
     except ImportError as exc:
-        raise ToCodeError("unable to import ida_domain; pass --ida-domain-path or install ida-domain") from exc
+        raise ToCodeError(
+            "unable to import ida_domain; pass --ida-domain-path or install ida-domain"
+        ) from exc
 
-    return IdaRuntime(idapro=idapro, ida_domain=ida_domain, idadir=resolved_idadir, ida_domain_path=resolved_domain)
+    return IdaRuntime(
+        idapro=idapro,
+        ida_domain=ida_domain,
+        idadir=resolved_idadir,
+        ida_domain_path=resolved_domain,
+    )
 
 
 def discover_idadir(explicit: Path | None = None) -> Path | None:
@@ -165,7 +187,9 @@ def discover_idadir(explicit: Path | None = None) -> Path | None:
 
     applications = Path("/Applications")
     if applications.is_dir():
-        candidates.extend(sorted(applications.glob("IDA*.app/Contents/MacOS"), reverse=True))
+        candidates.extend(
+            sorted(applications.glob("IDA*.app/Contents/MacOS"), reverse=True)
+        )
 
     for candidate in candidates:
         resolved = candidate.expanduser().resolve()

@@ -27,7 +27,9 @@ def imports_json(analysis: ProgramAnalysis) -> dict[str, object]:
     return {
         "imports": [
             {"dll": dll, "functions": functions}
-            for dll, functions in sorted(grouped.items(), key=lambda value: value[0].lower())
+            for dll, functions in sorted(
+                grouped.items(), key=lambda value: value[0].lower()
+            )
         ],
     }
 
@@ -39,12 +41,18 @@ def exports_json(analysis: ProgramAnalysis) -> dict[str, object]:
                 "ordinal": item.ordinal,
                 "name": item.name,
                 "address": f"0x{item.address:x}",
-                "is_forwarder": item.forwarder or inferred_forwarder(analysis, item) is not None,
-                "forwarder_target": item.forwarder_target or inferred_forwarder(analysis, item),
+                "is_forwarder": item.forwarder
+                or inferred_forwarder(analysis, item) is not None,
+                "forwarder_target": item.forwarder_target
+                or inferred_forwarder(analysis, item),
             }
             for item in sorted(
                 analysis.exports,
-                key=lambda item: (item.ordinal if item.ordinal is not None else 1 << 30, item.name, item.address),
+                key=lambda item: (
+                    item.ordinal if item.ordinal is not None else 1 << 30,
+                    item.name,
+                    item.address,
+                ),
             )
         ]
     }
@@ -84,7 +92,9 @@ def relocations_json(analysis: ProgramAnalysis) -> dict[str, object]:
     }
 
 
-def strings_json(analysis: ProgramAnalysis, ranges: list[FunctionRange]) -> dict[str, object]:
+def strings_json(
+    analysis: ProgramAnalysis, ranges: list[FunctionRange]
+) -> dict[str, object]:
     xrefs = string_xrefs(analysis.strings, ranges)
     return {
         "strings": [
@@ -132,7 +142,11 @@ def functions_json(
                 "nlocals": routine.locals_count,
                 "stackframe": routine.stack_size,
                 "callees": [f"0x{item:x}" for item in callees],
-                "callee_names": [analysis.routines[item].name for item in callees if item in analysis.routines],
+                "callee_names": [
+                    analysis.routines[item].name
+                    for item in callees
+                    if item in analysis.routines
+                ],
                 "callees_imports": analysis.import_calls.get(address, []),
                 "callee_count": len(set(callees)),
                 "callers": [f"0x{item:x}" for item in callers],
@@ -142,7 +156,9 @@ def functions_json(
                 "source_line_start": raw_range.c_line_start if raw_range else None,
                 "source_line_end": raw_range.c_line_end if raw_range else None,
                 "tree_source_file": str(tree_range.c_file) if tree_range else None,
-                "tree_source_line_start": tree_range.c_line_start if tree_range else None,
+                "tree_source_line_start": tree_range.c_line_start
+                if tree_range
+                else None,
                 "tree_source_line_end": tree_range.c_line_end if tree_range else None,
                 "asm_file": str(raw_range.asm_file) if raw_range else None,
                 "asm_line_start": raw_range.asm_line_start if raw_range else None,
@@ -157,15 +173,23 @@ def reachable_json(analysis: ProgramAnalysis) -> dict[str, object]:
     internal = [item for item in analysis.routines.values() if not item.imported]
     return {
         "reachable": [
-            {"address": f"0x{address:x}", "name": analysis.routines[address].name, "depth": depth}
-            for address, depth in sorted(depths.items(), key=lambda item: (item[1], item[0]))
+            {
+                "address": f"0x{address:x}",
+                "name": analysis.routines[address].name,
+                "depth": depth,
+            }
+            for address, depth in sorted(
+                depths.items(), key=lambda item: (item[1], item[0])
+            )
         ],
         "unreachable_count": sum(1 for item in internal if item.address not in depths),
     }
 
 
 def reachable_depths(analysis: ProgramAnalysis) -> dict[int, int]:
-    seeds = [address for address in entry_seeds(analysis) if address in analysis.routines]
+    seeds = [
+        address for address in entry_seeds(analysis) if address in analysis.routines
+    ]
     if not seeds:
         seeds = [address for address in analysis.roots if address in analysis.routines]
     depths: dict[int, int] = {}
@@ -209,7 +233,9 @@ def cluster_graph_json(
         "clusters": [
             {
                 "id": cluster_id(cluster),
-                "file": display_path(file_by_root.get(cluster.root, Path(c_file_name(cluster)))),
+                "file": display_path(
+                    file_by_root.get(cluster.root, Path(c_file_name(cluster)))
+                ),
                 "root_function": cluster.label,
                 "calls_clusters": sorted(outgoing.get(cluster_id(cluster), set())),
                 "called_by_clusters": sorted(incoming.get(cluster_id(cluster), set())),
@@ -248,7 +274,9 @@ def entry_clusters(
     ranges: list[FunctionRange],
 ) -> list[dict[str, object]]:
     ranges_by_address = {item.address: item for item in ranges}
-    cluster_by_address = {address: cluster for cluster in clusters for address in cluster.members}
+    cluster_by_address = {
+        address: cluster for cluster in clusters for address in cluster.members
+    }
     rows: list[dict[str, object]] = []
     for address in entry_seeds(analysis):
         routine = analysis.routines.get(address)
@@ -261,14 +289,20 @@ def entry_clusters(
                 "address": f"0x{address:x}",
                 "cluster": display_path(row_range.c_file)
                 if row_range
-                else (c_file_name(cluster_by_address[address]) if address in cluster_by_address else None),
+                else (
+                    c_file_name(cluster_by_address[address])
+                    if address in cluster_by_address
+                    else None
+                ),
                 "line": row_range.c_line_start if row_range else None,
             }
         )
     return rows
 
 
-def export_variables(analysis: ProgramAnalysis, root: Path, ranges: list[FunctionRange]) -> int:
+def export_variables(
+    analysis: ProgramAnalysis, root: Path, ranges: list[FunctionRange]
+) -> int:
     data_dir = root / "data"
     sections: list[dict[str, object]] = []
     with analysis.binary.path.open("rb") as handle:
@@ -295,18 +329,27 @@ def export_variables(analysis: ProgramAnalysis, root: Path, ranges: list[Functio
                 }
             )
     variables = variables_document(analysis, ranges)
-    write_json(data_dir / "variables.json", {"sections": sections, "variables": variables})
-    write_json(data_dir / "variables_interesting.json", interesting_variables(analysis, variables))
+    write_json(
+        data_dir / "variables.json", {"sections": sections, "variables": variables}
+    )
+    write_json(
+        data_dir / "variables_interesting.json",
+        interesting_variables(analysis, variables),
+    )
     return len(variables)
 
 
-def variables_document(analysis: ProgramAnalysis, ranges: list[FunctionRange]) -> dict[str, dict[str, object]]:
+def variables_document(
+    analysis: ProgramAnalysis, ranges: list[FunctionRange]
+) -> dict[str, dict[str, object]]:
     variables: dict[str, dict[str, object]] = {}
     seen: set[int] = set()
     data_segments = [
         segment
         for segment in analysis.segments
-        if segment.readable and not segment.executable and max(segment.vsize, segment.size) > 0
+        if segment.readable
+        and not segment.executable
+        and max(segment.vsize, segment.size) > 0
     ]
 
     def containing(address: int) -> Segment | None:
@@ -323,7 +366,10 @@ def variables_document(analysis: ProgramAnalysis, ranges: list[FunctionRange]) -
         segment = containing(item.vaddr)
         if segment is None:
             continue
-        label = unique(f"str_{clean_path_component(item.value[:32] or f'{item.vaddr:x}')}_{item.vaddr:x}", item.vaddr)
+        label = unique(
+            f"str_{clean_path_component(item.value[:32] or f'{item.vaddr:x}')}_{item.vaddr:x}",
+            item.vaddr,
+        )
         variables[label] = {
             "section": segment.name,
             "offset": item.vaddr - segment.vaddr,
@@ -373,7 +419,9 @@ def variables_document(analysis: ProgramAnalysis, ranges: list[FunctionRange]) -
         seen.add(item.vaddr)
 
     for item in analysis.flags:
-        if item.offset in seen or not item.name.startswith(("obj.", "data.", "str.", "reloc.", "vtable.")):
+        if item.offset in seen or not item.name.startswith(
+            ("obj.", "data.", "str.", "reloc.", "vtable.")
+        ):
             continue
         segment = containing(item.offset)
         if segment is None:
@@ -400,7 +448,9 @@ def source_lines(ranges: list[FunctionRange]) -> list[dict[str, object]]:
     for item in ranges:
         if item.c_file not in cache:
             try:
-                cache[item.c_file] = item.c_file.read_text(encoding="utf-8", errors="replace").splitlines()
+                cache[item.c_file] = item.c_file.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines()
             except OSError:
                 cache[item.c_file] = []
         for line_number in range(item.c_line_start, item.c_line_end + 1):
@@ -418,7 +468,9 @@ def source_lines(ranges: list[FunctionRange]) -> list[dict[str, object]]:
     return rows
 
 
-def string_xrefs(strings: list, ranges: list[FunctionRange]) -> dict[int, list[dict[str, object]]]:
+def string_xrefs(
+    strings: list, ranges: list[FunctionRange]
+) -> dict[int, list[dict[str, object]]]:
     lines = source_lines(ranges)
     result: dict[int, list[dict[str, object]]] = {}
     for item in strings:
@@ -444,7 +496,9 @@ def string_xrefs(strings: list, ranges: list[FunctionRange]) -> dict[int, list[d
     return result
 
 
-def add_variable_xrefs(variables: dict[str, dict[str, object]], ranges: list[FunctionRange]) -> None:
+def add_variable_xrefs(
+    variables: dict[str, dict[str, object]], ranges: list[FunctionRange]
+) -> None:
     lines = source_lines(ranges)
     for name, variable in variables.items():
         needles = {name}
@@ -479,10 +533,16 @@ def string_needles(value: str) -> list[str]:
     if len(text) < 4:
         return []
     escaped = text.encode("unicode_escape").decode("ascii")
-    return [item for item in {text, escaped, escaped.replace("\\\\", "\\")} if len(item) >= 4]
+    return [
+        item
+        for item in {text, escaped, escaped.replace("\\\\", "\\")}
+        if len(item) >= 4
+    ]
 
 
-def interesting_variables(analysis: ProgramAnalysis, variables: dict[str, dict[str, object]]) -> dict[str, object]:
+def interesting_variables(
+    analysis: ProgramAnalysis, variables: dict[str, dict[str, object]]
+) -> dict[str, object]:
     known_strings = {item.value for item in analysis.strings}
     result: dict[str, dict[str, object]] = {}
     for name, variable in variables.items():
@@ -490,14 +550,22 @@ def interesting_variables(analysis: ProgramAnalysis, variables: dict[str, dict[s
         type_name = str(variable.get("type", ""))
         xrefs = variable.get("xrefs")
         xref_rows = xrefs if isinstance(xrefs, list) else []
-        writers = [row for row in xref_rows if isinstance(row, dict) and row.get("access") == "write"]
+        writers = [
+            row
+            for row in xref_rows
+            if isinstance(row, dict) and row.get("access") == "write"
+        ]
         value = variable.get("value")
         reasons: list[str] = []
         if "[]" in type_name and size > 16:
             reasons.append("large_byte_array")
         if isinstance(value, str) and value not in known_strings:
             reasons.append("string_not_in_strings_json")
-        if "void*" in type_name or "code" in type_name.lower() or "relocation_type" in variable:
+        if (
+            "void*" in type_name
+            or "code" in type_name.lower()
+            or "relocation_type" in variable
+        ):
             reasons.append("function_pointer_or_relocation")
         if len({row.get("address") for row in writers}) > 1:
             reasons.append("multiple_writers")
@@ -541,22 +609,40 @@ def inferred_forwarder(analysis: ProgramAnalysis, export: object) -> str | None:
     if segment is not None and segment.executable:
         return None
     for item in analysis.strings:
-        if item.vaddr <= address < item.vaddr + max(item.size, 1) and looks_forwarded(item.value):
+        if item.vaddr <= address < item.vaddr + max(item.size, 1) and looks_forwarded(
+            item.value
+        ):
             return item.value
     return None
 
 
 def looks_forwarded(value: str) -> bool:
-    return bool(re.match(r"^[A-Za-z0-9_.-]+\.dll(?:\.[A-Za-z0-9_?$@.-]+)+$", value.strip(), re.IGNORECASE))
+    return bool(
+        re.match(
+            r"^[A-Za-z0-9_.-]+\.dll(?:\.[A-Za-z0-9_?$@.-]+)+$",
+            value.strip(),
+            re.IGNORECASE,
+        )
+    )
 
 
-def triage_sections(analysis: ProgramAnalysis, *, rwx_only: bool = False) -> list[dict[str, object]]:
+def triage_sections(
+    analysis: ProgramAnalysis, *, rwx_only: bool = False
+) -> list[dict[str, object]]:
     rows = []
     for item in analysis.segments:
         rwx = item.readable and item.writable and item.executable
         if rwx_only and not rwx:
             continue
-        rows.append({"name": item.name, "entropy": section_entropy(analysis, item), "perms": item.perms, "size": item.size, "rwx": rwx})
+        rows.append(
+            {
+                "name": item.name,
+                "entropy": section_entropy(analysis, item),
+                "perms": item.perms,
+                "size": item.size,
+                "rwx": rwx,
+            }
+        )
     return rows
 
 
@@ -572,7 +658,10 @@ def binary_type(analysis: ProgramAnalysis) -> str:
 def guess_compiler(analysis: ProgramAnalysis) -> str | None:
     names = " ".join(item.name for item in analysis.imports.values()).lower()
     strings = " ".join(item.value for item in analysis.strings[:500]).lower()
-    if any(token in names or token in strings for token in ("msvcrt", "ucrtbase", "vcruntime", "__security_check_cookie")):
+    if any(
+        token in names or token in strings
+        for token in ("msvcrt", "ucrtbase", "vcruntime", "__security_check_cookie")
+    ):
         return "MSVC"
     if "libgcc" in strings or "__gxx" in names:
         return "GCC/MinGW"
@@ -582,7 +671,11 @@ def guess_compiler(analysis: ProgramAnalysis) -> str | None:
 def guess_packed(analysis: ProgramAnalysis) -> bool:
     executable = [segment for segment in analysis.segments if segment.executable]
     return bool(
-        [segment for segment in executable if (section_entropy(analysis, segment) or 0.0) >= 7.2]
+        [
+            segment
+            for segment in executable
+            if (section_entropy(analysis, segment) or 0.0) >= 7.2
+        ]
         and len(analysis.imports) <= 5
     )
 
@@ -619,10 +712,14 @@ def shannon_entropy(data: bytes) -> float:
 
 
 def cluster_id(cluster: Cluster) -> str:
-    return "utils" if cluster.root == SHARED_CLUSTER_ID else f"cluster_{cluster.root:016x}"
+    return (
+        "utils" if cluster.root == SHARED_CLUSTER_ID else f"cluster_{cluster.root:016x}"
+    )
 
 
 def write_json(path: Path, payload: dict[str, object]) -> None:
     import json
 
-    path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8"
+    )

@@ -68,7 +68,9 @@ class R2Session:
         try:
             return self._pipe.cmdj(command)
         except ValueError as exc:
-            raise BackendJsonError(f"radare2 returned invalid JSON for {command!r}") from exc
+            raise BackendJsonError(
+                f"radare2 returned invalid JSON for {command!r}"
+            ) from exc
         except Exception as exc:  # noqa: BLE001
             raise BackendError(f"radare2 JSON command failed: {command!r}") from exc
 
@@ -125,7 +127,9 @@ class R2Session:
             self._pdfj[address] = self.cmdj(f"pdfj @ 0x{address:x}") or {}
         return self._pdfj[address]
 
-    def calls_from(self, address: int, imports, functions) -> tuple[list[int], list[str]]:
+    def calls_from(
+        self, address: int, imports, functions
+    ) -> tuple[list[int], list[str]]:
         body = self._disasm_json(address)
         function_addrs = set(functions)
         edges: set[int] = set()
@@ -147,7 +151,9 @@ class R2Session:
                     edges.add(target)
         return sorted(edges), sorted(name for name in imported if name)
 
-    def _direct_call_target(self, target: Any, refs: list[dict[str, Any]]) -> int | None:
+    def _direct_call_target(
+        self, target: Any, refs: list[dict[str, Any]]
+    ) -> int | None:
         if isinstance(target, int):
             return target
         for ref in refs:

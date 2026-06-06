@@ -82,6 +82,18 @@ uv run --extra dev pytest -q
 python3 -m compileall src tests
 ```
 
+Run the full local CI/quality gate when changing shared behavior:
+
+```bash
+./ci-local.sh
+```
+
+On Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\ci-local.ps1
+```
+
 For backend-sensitive changes, also run a real export when IDA is available:
 
 ```bash

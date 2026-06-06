@@ -1,6 +1,9 @@
 /target
 /.venv
 /.pytest_cache
+/.mypy_cache
+/.ruff_cache
+/.desloppify
 __pycache__/
 *.py[cod]
 *.egg-info/

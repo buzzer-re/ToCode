@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tocode.exporter import _worker_spec, export_binary, fallback_prototype, render_one, tree_safe_function
+from tocode.exporter import (
+    _worker_spec,
+    export_binary,
+    fallback_prototype,
+    render_one,
+    tree_safe_function,
+)
 from tocode.naming import NameBook
 from tocode.progress import Progress
 from tocode.schema import (
@@ -22,7 +28,9 @@ class FakeAnalyzer:
     supports_parallel = False
     analysis_seconds = 0.01
 
-    def __init__(self, analysis: ProgramAnalysis, database_path: Path | None = None) -> None:
+    def __init__(
+        self, analysis: ProgramAnalysis, database_path: Path | None = None
+    ) -> None:
         self.analysis = analysis
         self.binary = analysis.binary.path
         self.progress = Progress(enabled=False)
@@ -75,7 +83,9 @@ class TrackingSession:
 
     def decompile(self, _address: int) -> str:
         self.decompile_calls += 1
-        return "_BOOL8 __scrt_is_ucrt_dll_in_use()\n{\n  return dword_140005070 != 0;\n}"
+        return (
+            "_BOOL8 __scrt_is_ucrt_dll_in_use()\n{\n  return dword_140005070 != 0;\n}"
+        )
 
 
 def test_export_binary_writes_source_tree_and_metadata(tmp_path: Path) -> None:
@@ -97,8 +107,12 @@ def test_export_binary_writes_source_tree_and_metadata(tmp_path: Path) -> None:
             Segment(".rodata", 32, 32, "PROGBITS", "r--", 256, 0x2000),
         ],
         routines={
-            0x1000: Routine(0x1000, "main", 48, "int main(void)", None, False, 0, 0, 0, 1, 0),
-            0x1050: Routine(0x1050, "helper", 32, "int helper(void)", None, False, 0, 0, 0, 0, 1),
+            0x1000: Routine(
+                0x1000, "main", 48, "int main(void)", None, False, 0, 0, 0, 1, 0
+            ),
+            0x1050: Routine(
+                0x1050, "helper", 32, "int helper(void)", None, False, 0, 0, 0, 0, 1
+            ),
         },
         imports={},
         exports=[],
@@ -124,29 +138,41 @@ def test_export_binary_writes_source_tree_and_metadata(tmp_path: Path) -> None:
     assert summary.function_count == 2
     assert summary.cluster_count == 1
     assert (summary.root_dir / "AGENTS.md").is_file()
-    assert (summary.root_dir / "CLAUDE.md").read_text(encoding="utf-8") == "@./AGENTS.md\n"
+    assert (summary.root_dir / "CLAUDE.md").read_text(
+        encoding="utf-8"
+    ) == "@./AGENTS.md\n"
     assert (summary.root_dir / "project.json").is_file()
     assert (summary.root_dir / "export-manifest.json").is_file()
-    assert (summary.root_dir / "src" / "raw" / "app" / "cluster_0000000000001000.c").is_file()
-    assert (summary.root_dir / "src" / "tree" / "app" / "cluster_0000000000001000.c").is_file()
+    assert (
+        summary.root_dir / "src" / "raw" / "app" / "cluster_0000000000001000.c"
+    ).is_file()
+    assert (
+        summary.root_dir / "src" / "tree" / "app" / "cluster_0000000000001000.c"
+    ).is_file()
     assert (summary.root_dir / "function-index-tree.json").is_file()
     assert (summary.root_dir / "include" / "tocode_tree.h").is_file()
     assert not (summary.root_dir / "src" / ("ll" + "m")).exists()
     assert (summary.root_dir / "data" / "rodata.bin").is_file()
 
-    manifest = json.loads((summary.root_dir / "export-manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (summary.root_dir / "export-manifest.json").read_text(encoding="utf-8")
+    )
     assert manifest["function_count"] == 2
     assert manifest["claude"].endswith("CLAUDE.md")
     assert len(manifest["tree_source_files"]) == 1
     assert manifest["tree_function_index"].endswith("function-index-tree.json")
     assert ("ll" + "m_available") not in manifest
 
-    functions = json.loads((summary.root_dir / "functions.json").read_text(encoding="utf-8"))
+    functions = json.loads(
+        (summary.root_dir / "functions.json").read_text(encoding="utf-8")
+    )
     first_function = functions["functions"][0]
     assert first_function["tree_source_file"]
     assert first_function["tree_source_line_start"]
 
-    project = json.loads((summary.root_dir / "project.json").read_text(encoding="utf-8"))
+    project = json.loads(
+        (summary.root_dir / "project.json").read_text(encoding="utf-8")
+    )
     assert project["claude"].endswith("CLAUDE.md")
 
     agents = (summary.root_dir / "AGENTS.md").read_text(encoding="utf-8")
@@ -179,7 +205,9 @@ def test_export_binary_publishes_ida_database(tmp_path: Path) -> None:
         ),
         segments=[Segment(".text", 128, 128, "PROGBITS", "r-x", 0, 0x1000)],
         routines={
-            0x1000: Routine(0x1000, "main", 48, "int main(void)", None, False, 0, 0, 0, 0, 0),
+            0x1000: Routine(
+                0x1000, "main", 48, "int main(void)", None, False, 0, 0, 0, 0, 0
+            ),
         },
         imports={},
         exports=[],
@@ -204,8 +232,12 @@ def test_export_binary_publishes_ida_database(tmp_path: Path) -> None:
     exported_database = summary.root_dir / "sample.i64"
     assert exported_database.read_bytes() == b"IDA database"
 
-    manifest = json.loads((summary.root_dir / "export-manifest.json").read_text(encoding="utf-8"))
-    project = json.loads((summary.root_dir / "project.json").read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (summary.root_dir / "export-manifest.json").read_text(encoding="utf-8")
+    )
+    project = json.loads(
+        (summary.root_dir / "project.json").read_text(encoding="utf-8")
+    )
     assert manifest["ida_database"] == str(exported_database.resolve())
     assert project["ida_database"] == str(exported_database.resolve())
 
@@ -339,7 +371,9 @@ def test_export_binary_can_skip_tree_source(tmp_path: Path) -> None:
         ),
         segments=[Segment(".text", 128, 128, "PROGBITS", "r-x", 0, 0x1000)],
         routines={
-            0x1000: Routine(0x1000, "main", 48, "int main(void)", None, False, 0, 0, 0, 0, 0),
+            0x1000: Routine(
+                0x1000, "main", 48, "int main(void)", None, False, 0, 0, 0, 0, 0
+            ),
         },
         imports={},
         exports=[],

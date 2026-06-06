@@ -76,7 +76,10 @@ def cluster_routines(
     clusters: list[Cluster] = []
     for label, members in buckets.items():
         member_set = set(members)
-        root = next((candidate for candidate in roots if candidate in member_set), components[label][0])
+        root = next(
+            (candidate for candidate in roots if candidate in member_set),
+            components[label][0],
+        )
         clusters.append(
             Cluster(
                 root=root,
@@ -113,19 +116,19 @@ def _scc(
     for start in ordered:
         if start in visited:
             continue
-        stack: list[tuple[int, bool]] = [(start, False)]
-        while stack:
-            node, expanded = stack.pop()
+        dfs_stack: list[tuple[int, bool]] = [(start, False)]
+        while dfs_stack:
+            node, expanded = dfs_stack.pop()
             if expanded:
                 finished.append(node)
                 continue
             if node in visited:
                 continue
             visited.add(node)
-            stack.append((node, True))
+            dfs_stack.append((node, True))
             for child in reversed(callees.get(node, [])):
                 if child in allowed and child not in visited:
-                    stack.append((child, False))
+                    dfs_stack.append((child, False))
 
     visited.clear()
     groups: list[list[int]] = []
@@ -133,15 +136,15 @@ def _scc(
         if start in visited:
             continue
         group: list[int] = []
-        stack = [start]
+        reverse_stack: list[int] = [start]
         visited.add(start)
-        while stack:
-            node = stack.pop()
+        while reverse_stack:
+            node = reverse_stack.pop()
             group.append(node)
             for parent in callers.get(node, []):
                 if parent in allowed and parent not in visited:
                     visited.add(parent)
-                    stack.append(parent)
+                    reverse_stack.append(parent)
         groups.append(group)
     return groups
 
@@ -149,7 +152,7 @@ def _scc(
 def _preorder(root: int, members: set[int], callees: dict[int, list[int]]) -> list[int]:
     output: list[int] = []
     seen: set[int] = set()
-    stack = [root]
+    stack: list[int] = [root]
     while stack:
         address = stack.pop()
         if address not in members or address in seen:

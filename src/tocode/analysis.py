@@ -24,7 +24,13 @@ from .schema import (
 
 
 class BinaryAnalyzer:
-    def __init__(self, binary: Path, *, session: DecompilerSession, progress: Progress | None = None) -> None:
+    def __init__(
+        self,
+        binary: Path,
+        *,
+        session: DecompilerSession,
+        progress: Progress | None = None,
+    ) -> None:
         self.binary = Path(binary).resolve()
         self.session = session
         self.progress = progress or Progress()
@@ -59,7 +65,10 @@ class BinaryAnalyzer:
 
     def collect(self) -> ProgramAnalysis:
         started = time.monotonic()
-        label = self.session.analysis_command or f"{self.session.backend_label} auto-analysis"
+        label = (
+            self.session.analysis_command
+            or f"{self.session.backend_label} auto-analysis"
+        )
         self.progress.log(f"Analyzing with {label}")
         with self.progress.bar(total=15, desc="analyze", unit="step") as bar:
             self.session.analyze()
@@ -68,7 +77,9 @@ class BinaryAnalyzer:
             bar.update(1)
             entries = self.session.entries()
             bar.update(1)
-            segments = [self._segment(row) for row in self.session.sections() if row.get("name")]
+            segments = [
+                self._segment(row) for row in self.session.sections() if row.get("name")
+            ]
             bar.update(1)
             imports = self._imports(self.session.imports())
             bar.update(1)
@@ -148,7 +159,9 @@ class BinaryAnalyzer:
         if callable(prepare):
             prepare()
 
-    def _binary_facts(self, info: dict[str, Any], entries: list[dict[str, Any]]) -> BinaryFacts:
+    def _binary_facts(
+        self, info: dict[str, Any], entries: list[dict[str, Any]]
+    ) -> BinaryFacts:
         binary = info.get("bin", {})
         tocode = info.get("tocode", {})
         source_path = self.binary
@@ -166,7 +179,11 @@ class BinaryAnalyzer:
             os_name=str(binary.get("os", "unknown")),
             format_name=str(binary.get("format", "unknown")),
             file_type=str(binary.get("class", binary.get("type", "unknown"))),
-            entrypoints=[int(row.get("vaddr", 0)) for row in entries if row.get("vaddr") is not None],
+            entrypoints=[
+                int(row.get("vaddr", 0))
+                for row in entries
+                if row.get("vaddr") is not None
+            ],
         )
 
     def _imports(self, rows: list[dict[str, Any]]) -> dict[int, ImportEntry]:
@@ -209,7 +226,8 @@ class BinaryAnalyzer:
                 args_count=int(row.get("nargs", 0) or 0),
                 outdegree=int(row.get("outdegree", 0) or 0),
                 indegree=int(row.get("indegree", 0) or 0),
-                imported=address in imports or name.startswith(("sym.imp.", "loc.imp.", "__imp_")),
+                imported=address in imports
+                or name.startswith(("sym.imp.", "loc.imp.", "__imp_")),
                 library=bool(row.get("is_library", False)),
                 thunk=bool(row.get("is_thunk", False)),
                 code_kind=str(row.get("source_kind", "app") or "app"),
@@ -253,7 +271,11 @@ class BinaryAnalyzer:
             if item.address in routines and item.address not in roots:
                 roots.append(item.address)
         for address, routine in routines.items():
-            if not routine.imported and not callers.get(address) and address not in roots:
+            if (
+                not routine.imported
+                and not callers.get(address)
+                and address not in roots
+            ):
                 roots.append(address)
         return roots
 
@@ -270,7 +292,11 @@ class BinaryAnalyzer:
                 continue
             if routine.size <= 16:
                 targets = callees.get(address, [])
-                if len(targets) == 1 and routines.get(targets[0]) is not None and routines[targets[0]].imported:
+                if (
+                    len(targets) == 1
+                    and routines.get(targets[0]) is not None
+                    and routines[targets[0]].imported
+                ):
                     result.add(address)
                 if not targets and len(import_calls.get(address, [])) == 1:
                     result.add(address)
@@ -297,7 +323,9 @@ class BinaryAnalyzer:
 
     @staticmethod
     def _export(row: dict[str, Any]) -> ExportEntry:
-        forwarder_target = _first_text(row, "forwarder_target", "forwarder", "forwarder_name", "target")
+        forwarder_target = _first_text(
+            row, "forwarder_target", "forwarder", "forwarder_name", "target"
+        )
         return ExportEntry(
             name=str(row.get("name", "")),
             address=int(row.get("vaddr", 0) or 0),

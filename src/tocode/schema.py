@@ -200,7 +200,9 @@ class ProgramAnalysis:
             self._app_cache = [
                 routine
                 for routine in self.routines.values()
-                if not routine.imported and routine.code_kind == "app" and not routine.library
+                if not routine.imported
+                and routine.code_kind == "app"
+                and not routine.library
             ]
         return self._app_cache
 
