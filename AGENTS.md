@@ -46,6 +46,7 @@ The CLI accepts a regular binary file or IDA database and writes a project direc
 - `project.json`
 - `export-manifest.json`
 - generated export `AGENTS.md`
+- generated export `CLAUDE.md`
 
 When the IDA backend is used, the export also contains:
 

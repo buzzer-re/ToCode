@@ -1042,6 +1042,7 @@ def _write_metadata(context: ExportContext) -> None:
         build_export_agents(analysis, context.header_name, tree_enabled=context.tree_enabled),
         encoding="utf-8",
     )
+    (root / "CLAUDE.md").write_text("@./AGENTS.md\n", encoding="utf-8")
     context.manifest = write_manifest(context)
 
 
@@ -1185,6 +1186,7 @@ def write_project_json(context: ExportContext) -> None:
             "data_dir": str(_need(context.data_dir).resolve()),
             "header": str(_need(context.header_path).resolve()),
             "agents": str((root / "AGENTS.md").resolve()),
+            "claude": str((root / "CLAUDE.md").resolve()),
             "ida_database": str(context.ida_database) if context.ida_database is not None else None,
             "source_files": [str(item) for item in context.raw_sources],
             "tree_source_files": [str(item) for item in context.tree_sources],
@@ -1236,6 +1238,7 @@ def write_manifest(context: ExportContext) -> Path:
             "worker_count": context.worker_count,
             "parallel_mode": context.render_mode,
             "agents": str((root / "AGENTS.md").resolve()),
+            "claude": str((root / "CLAUDE.md").resolve()),
             "triage": str((root / "triage.json").resolve()),
             "imports": str((root / "imports.json").resolve()),
             "exports": str((root / "exports.json").resolve()),
@@ -1293,6 +1296,7 @@ def build_export_agents(analysis: ProgramAnalysis, header_name: str, *, tree_ena
         "- `function-index.json`: exact raw source and ASM line mappings for each exported function.",
         "- `sections.json`, `strings.json`, and `relocations.json`: layout and reference metadata.",
         "- `project.json` and `export-manifest.json`: top-level export paths and artifact inventory.",
+        "- `CLAUDE.md`: Claude entrypoint that references `AGENTS.md`.",
         "- `<binary>.i64` or `<binary>.idb`: exported IDA database when the IDA backend was used.",
         "",
         "## Working Style",

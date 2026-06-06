@@ -124,6 +124,7 @@ def test_export_binary_writes_source_tree_and_metadata(tmp_path: Path) -> None:
     assert summary.function_count == 2
     assert summary.cluster_count == 1
     assert (summary.root_dir / "AGENTS.md").is_file()
+    assert (summary.root_dir / "CLAUDE.md").read_text(encoding="utf-8") == "@./AGENTS.md\n"
     assert (summary.root_dir / "project.json").is_file()
     assert (summary.root_dir / "export-manifest.json").is_file()
     assert (summary.root_dir / "src" / "raw" / "app" / "cluster_0000000000001000.c").is_file()
@@ -135,6 +136,7 @@ def test_export_binary_writes_source_tree_and_metadata(tmp_path: Path) -> None:
 
     manifest = json.loads((summary.root_dir / "export-manifest.json").read_text(encoding="utf-8"))
     assert manifest["function_count"] == 2
+    assert manifest["claude"].endswith("CLAUDE.md")
     assert len(manifest["tree_source_files"]) == 1
     assert manifest["tree_function_index"].endswith("function-index-tree.json")
     assert ("ll" + "m_available") not in manifest
@@ -143,6 +145,9 @@ def test_export_binary_writes_source_tree_and_metadata(tmp_path: Path) -> None:
     first_function = functions["functions"][0]
     assert first_function["tree_source_file"]
     assert first_function["tree_source_line_start"]
+
+    project = json.loads((summary.root_dir / "project.json").read_text(encoding="utf-8"))
+    assert project["claude"].endswith("CLAUDE.md")
 
     agents = (summary.root_dir / "AGENTS.md").read_text(encoding="utf-8")
     assert "ToCode binary export" in agents
