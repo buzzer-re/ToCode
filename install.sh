@@ -138,9 +138,9 @@ fi
 if command -v uv >/dev/null 2>&1; then
   info "Syncing local project environment with uv"
   if [ "$with_dev" = true ]; then
-    uv --directory "$install_dir" sync --extra dev
+    uv --directory "$install_dir" sync --locked --extra dev
   else
-    uv --directory "$install_dir" sync
+    uv --directory "$install_dir" sync --locked
   fi
 
   info "Installing the tocode command with uv"

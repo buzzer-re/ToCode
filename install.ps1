@@ -125,10 +125,10 @@ else {
 if (Test-Command "uv") {
     Write-Step "Syncing local project environment with uv"
     if ($Dev) {
-        uv --directory $InstallDir sync --extra dev
+        uv --directory $InstallDir sync --locked --extra dev
     }
     else {
-        uv --directory $InstallDir sync
+        uv --directory $InstallDir sync --locked
     }
 
     Write-Step "Installing the tocode command with uv"

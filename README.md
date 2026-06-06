@@ -76,7 +76,7 @@ Manual setup (requires [uv](https://docs.astral.sh/uv/)):
 ```bash
 git clone https://github.com/buzzer-re/ToCode
 cd ToCode
-uv sync
+uv sync --locked
 uv tool install --force --editable .
 ```
 
@@ -95,8 +95,6 @@ codex
 tocode firmwareX.bin.i64 -o firmwareX_decompiled/
 ...
 ```
-
-
 
 ## Development
 

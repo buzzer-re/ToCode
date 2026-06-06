@@ -99,7 +99,7 @@ PYTHON_BIN="$(find_python || true)"
 
 run_tool() {
   if [[ -n "$UV_BIN" ]]; then
-    "$UV_BIN" run "$@"
+    "$UV_BIN" run --locked "$@"
   else
     "$PYTHON_BIN" "$@"
   fi
@@ -109,7 +109,7 @@ run_with() {
   local package="$1"
   shift
   if [[ -n "$UV_BIN" ]]; then
-    "$UV_BIN" run --with "$package" "$@"
+    "$UV_BIN" run --locked --with "$package" "$@"
   else
     while [[ "${1:-}" == "--with" ]]; do
       shift 2
@@ -138,8 +138,8 @@ if [[ -z "$UV_BIN" ]]; then
     ruff==0.15.13 \
     mypy==2.1.0 \
     tomli==2.4.1 \
-    types-tqdm \
-    'pytest>=8,<9' || {
+    types-tqdm==4.67.3.20260518 \
+    pytest==8.4.2 || {
     fail "tool bootstrap" "pip install failed"
     echo "Could not install CI tools"
     exit 1
@@ -177,7 +177,7 @@ else
 fi
 
 info "[3/5] Mypy"
-if run_with mypy==2.1.0 --with tomli==2.4.1 --with types-tqdm --with 'pytest>=8,<9' python -m mypy \
+if run_with mypy==2.1.0 --with tomli==2.4.1 --with types-tqdm==4.67.3.20260518 --with pytest==8.4.2 python -m mypy \
   src tests --pretty; then
   ok "mypy"
 else

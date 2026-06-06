@@ -38,7 +38,7 @@ function Test-Command([string]$Name) {
 function Invoke-Tool {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
     if (Test-Command "uv") {
-        & uv run @Args
+        & uv run --locked @Args
     } else {
         & $Args[0] @($Args | Select-Object -Skip 1)
     }
@@ -50,7 +50,7 @@ function Invoke-With {
         [Parameter(ValueFromRemainingArguments = $true)][string[]]$Args
     )
     if (Test-Command "uv") {
-        $uvArgs = @("run")
+        $uvArgs = @("run", "--locked")
         foreach ($Package in $Packages) {
             $uvArgs += @("--with", $Package)
         }
@@ -91,7 +91,7 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 Write-Step "[3/5] Mypy"
-Invoke-With -Packages @("mypy==2.1.0", "tomli==2.4.1", "types-tqdm", "pytest>=8,<9") python -m mypy src tests --pretty
+Invoke-With -Packages @("mypy==2.1.0", "tomli==2.4.1", "types-tqdm==4.67.3.20260518", "pytest==8.4.2") python -m mypy src tests --pretty
 if ($LASTEXITCODE -eq 0) {
     Add-Pass "mypy"
 } else {
