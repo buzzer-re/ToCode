@@ -46,16 +46,16 @@ def describe_jobs(
     backend: str,
 ) -> str:
     if requested is not None:
-        return f"jobs: {selected} requested"
+        return f"Workers: {selected} requested"
     if function_count < MIN_FUNCTIONS_FOR_AUTO:
-        return f"jobs: 1 for {function_count} functions"
+        return f"Workers: 1 for {function_count} functions"
     if analysis_seconds is None:
-        return "jobs: 1, no analysis timing"
+        return "Workers: 1, no analysis timing"
     if selected == 1:
-        return f"jobs: 1 after {analysis_seconds:.2f}s analysis"
+        return f"Workers: 1 after {analysis_seconds:.2f}s analysis"
     if backend.lower() == "ida":
-        return f"jobs: {selected}, IDA cache ready"
-    return f"jobs: {selected} after {analysis_seconds:.2f}s analysis"
+        return f"Workers: {selected}, IDA cache ready"
+    return f"Workers: {selected} after {analysis_seconds:.2f}s analysis"
 
 
 def configured_job_limit() -> int:

@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tocode.exporter import export_binary, tree_safe_function
+from tocode.exporter import _worker_spec, export_binary, fallback_prototype, render_one, tree_safe_function
+from tocode.naming import NameBook
 from tocode.progress import Progress
 from tocode.schema import (
     BinaryFacts,
@@ -21,10 +22,11 @@ class FakeAnalyzer:
     supports_parallel = False
     analysis_seconds = 0.01
 
-    def __init__(self, analysis: ProgramAnalysis) -> None:
+    def __init__(self, analysis: ProgramAnalysis, database_path: Path | None = None) -> None:
         self.analysis = analysis
         self.binary = analysis.binary.path
         self.progress = Progress(enabled=False)
+        self.session = FakeSession(database_path)
 
     def collect(self) -> ProgramAnalysis:
         return self.analysis
@@ -45,6 +47,35 @@ class FakeAnalyzer:
 
     def prepare_parallel_workers(self) -> None:
         return
+
+
+class FakeSession:
+    def __init__(self, database_path: Path | None) -> None:
+        self._database_path = database_path
+
+    def database_path(self) -> Path | None:
+        return self._database_path
+
+
+class TrackingSession:
+    backend_name = "ida"
+    backend_label = "IDA Domain"
+    decompiler_label = "Hex-Rays"
+    parallel_safe = False
+    analysis_command = None
+
+    def __init__(self) -> None:
+        self.decompile_calls = 0
+
+    def disasm(self, _address: int) -> str:
+        return "xor eax, eax\nretn"
+
+    def function_summary(self, _address: int) -> str:
+        return "signature: _BOOL8()\ncallees: 0"
+
+    def decompile(self, _address: int) -> str:
+        self.decompile_calls += 1
+        return "_BOOL8 __scrt_is_ucrt_dll_in_use()\n{\n  return dword_140005070 != 0;\n}"
 
 
 def test_export_binary_writes_source_tree_and_metadata(tmp_path: Path) -> None:
@@ -87,6 +118,7 @@ def test_export_binary_writes_source_tree_and_metadata(tmp_path: Path) -> None:
         out_dir=tmp_path / "export",
         progress=Progress(enabled=False),
         jobs=None,
+        tree=True,
     )
 
     assert summary.function_count == 2
@@ -114,6 +146,176 @@ def test_export_binary_writes_source_tree_and_metadata(tmp_path: Path) -> None:
 
     agents = (summary.root_dir / "AGENTS.md").read_text(encoding="utf-8")
     assert "ToCode binary export" in agents
+    assert "oracle/helper" in agents
+
+    triage = json.loads((summary.root_dir / "triage.json").read_text(encoding="utf-8"))
+    assert "dynamic_api_resolution" not in triage
+    assert "has_debug_strings" not in triage
+    assert "embedded_pe" not in triage
+    assert "embedded_shellcode_hint" not in triage
+    assert "evasion" not in triage
+
+
+def test_export_binary_publishes_ida_database(tmp_path: Path) -> None:
+    binary = tmp_path / "sample.bin"
+    binary.write_bytes(b"\x7fELF" + b"\x00" * 256)
+    database = tmp_path / "cache.i64"
+    database.write_bytes(b"IDA database")
+    analysis = ProgramAnalysis(
+        binary=BinaryFacts(
+            path=binary,
+            arch="x86",
+            bits=64,
+            image_base=0x1000,
+            os_name="linux",
+            format_name="elf",
+            file_type="EXEC",
+            entrypoints=[0x1000],
+        ),
+        segments=[Segment(".text", 128, 128, "PROGBITS", "r-x", 0, 0x1000)],
+        routines={
+            0x1000: Routine(0x1000, "main", 48, "int main(void)", None, False, 0, 0, 0, 0, 0),
+        },
+        imports={},
+        exports=[],
+        symbols=[],
+        relocations=[],
+        strings=[],
+        flags=[],
+        callees={0x1000: []},
+        callers={0x1000: []},
+        import_calls={0x1000: []},
+        roots=[0x1000],
+        thunks=set(),
+    )
+
+    summary = export_binary(
+        FakeAnalyzer(analysis, database_path=database),  # type: ignore[arg-type]
+        out_dir=tmp_path / "export",
+        progress=Progress(enabled=False),
+        jobs=None,
+    )
+
+    exported_database = summary.root_dir / "sample.i64"
+    assert exported_database.read_bytes() == b"IDA database"
+
+    manifest = json.loads((summary.root_dir / "export-manifest.json").read_text(encoding="utf-8"))
+    project = json.loads((summary.root_dir / "project.json").read_text(encoding="utf-8"))
+    assert manifest["ida_database"] == str(exported_database.resolve())
+    assert project["ida_database"] == str(exported_database.resolve())
+
+
+def test_bool_return_signature_uses_routine_name() -> None:
+    routine = Routine(
+        0x140001FDC,
+        "__scrt_is_ucrt_dll_in_use",
+        12,
+        "_BOOL8()",
+        None,
+        False,
+        0,
+        0,
+        0,
+        0,
+        3,
+    )
+    names = NameBook(
+        functions={routine.address: "__scrt_is_ucrt_dll_in_use"},
+        imports={},
+        aliases={},
+    )
+
+    assert fallback_prototype(routine, 8, names) == "_BOOL8 __scrt_is_ucrt_dll_in_use()"
+
+
+def test_short_non_thunk_routine_is_decompiled() -> None:
+    routine = Routine(
+        0x140001FDC,
+        "__scrt_is_ucrt_dll_in_use",
+        12,
+        "_BOOL8()",
+        None,
+        False,
+        0,
+        0,
+        0,
+        0,
+        3,
+        thunk=False,
+    )
+    analysis = ProgramAnalysis(
+        binary=BinaryFacts(
+            path=Path("sample.exe"),
+            arch="x86",
+            bits=64,
+            image_base=0x140000000,
+            os_name="windows",
+            format_name="pe",
+            file_type="EXEC",
+            entrypoints=[routine.address],
+        ),
+        segments=[],
+        routines={routine.address: routine},
+        imports={},
+        exports=[],
+        symbols=[],
+        relocations=[],
+        strings=[],
+        flags=[],
+        callees={routine.address: []},
+        callers={routine.address: []},
+        import_calls={routine.address: []},
+        roots=[routine.address],
+        thunks=set(),
+    )
+    names = NameBook(
+        functions={routine.address: "__scrt_is_ucrt_dll_in_use"},
+        imports={},
+        aliases={},
+    )
+    session = TrackingSession()
+
+    rendered = render_one(session, analysis, routine, names)
+
+    assert session.decompile_calls == 1
+    assert "short routine" not in rendered.c_text
+    assert "dword_140005070 != 0" in rendered.c_text
+
+
+def test_worker_spec_uses_ida_database_input_for_worker_copies(tmp_path: Path) -> None:
+    database = tmp_path / "sample.i64"
+    database.write_bytes(b"IDA database")
+    analysis = ProgramAnalysis(
+        binary=BinaryFacts(
+            path=database,
+            arch="x86",
+            bits=64,
+            image_base=0x1000,
+            os_name="windows",
+            format_name="pe",
+            file_type="EXEC",
+            entrypoints=[0x1000],
+        ),
+        segments=[],
+        routines={},
+        imports={},
+        exports=[],
+        symbols=[],
+        relocations=[],
+        strings=[],
+        flags=[],
+        callees={},
+        callers={},
+        import_calls={},
+        roots=[],
+        thunks=set(),
+    )
+    analyzer = FakeAnalyzer(analysis, database_path=database)
+    analyzer.backend_name = "ida"
+
+    spec = _worker_spec(analyzer)  # type: ignore[arg-type]
+
+    assert spec.db_path == database
 
 
 def test_export_binary_can_skip_tree_source(tmp_path: Path) -> None:
@@ -158,7 +360,6 @@ def test_export_binary_can_skip_tree_source(tmp_path: Path) -> None:
         out_dir=export_root,
         progress=Progress(enabled=False),
         jobs=None,
-        tree=False,
     )
 
     assert summary.tree_src_dir is None

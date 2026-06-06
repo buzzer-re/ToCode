@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "ida-domain>=0.5.0",
+  "idapro>=0.0.9",
   "r2pipe>=1.9.8,<2",
   "tqdm>=4.66,<5",
 ]
@@ -17,6 +18,7 @@ license = "MIT"
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: Microsoft :: Windows",
   "Operating System :: POSIX :: Linux",
   "Operating System :: MacOS",
   "Topic :: Security",

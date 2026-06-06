@@ -6,11 +6,10 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .base import bootstrap_ida
+from .base import bootstrap_ida, is_ida_database
 from ..errors import BackendError
 
 
-_DB_SUFFIXES = frozenset({".i64", ".idb"})
 _MAX_THUNK_HOPS = 5
 
 
@@ -32,7 +31,7 @@ def _sha256(path: Path) -> str:
 
 
 def _database_path(binary: Path) -> tuple[Path, bool]:
-    if binary.suffix.lower() in _DB_SUFFIXES:
+    if is_ida_database(binary):
         return binary, False
     root = _cache_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -70,6 +69,7 @@ class IdaSession:
         self._ida_entry = self._optional_import("ida_entry")
         self._ida_fixup = self._optional_import("ida_fixup")
         self._ida_auto = self._optional_import("ida_auto")
+        self._ida_nalt = self._optional_import("ida_nalt")
 
         if db_path is None:
             resolved_db, first_open = _database_path(self.binary)
@@ -78,7 +78,7 @@ class IdaSession:
             resolved_db = db_path
             needs_analysis = bool(needs_analysis)
 
-        self._cache_db = None if self.binary.suffix.lower() in _DB_SUFFIXES else resolved_db
+        self._cache_db = None if is_ida_database(self.binary) else resolved_db
         if needs_analysis:
             self._opened_for_analysis = True
             options = self._Options(
@@ -154,8 +154,22 @@ class IdaSession:
         finally:
             self._opened_for_analysis = False
 
+    def database_path(self) -> Path | None:
+        if self._cache_db is None:
+            return self.binary if is_ida_database(self.binary) else None
+        if not self._cache_db.exists() or self._opened_for_analysis:
+            self._save_and_reopen_database()
+        return self._cache_db if self._cache_db.exists() else None
+
     def prepare_parallel_workers(self) -> None:
-        if self._cache_db is None or self._cache_db.exists():
+        if self._cache_db is None:
+            return
+        if self._cache_db.exists() and not self._opened_for_analysis:
+            return
+        self._save_and_reopen_database()
+
+    def _save_and_reopen_database(self) -> None:
+        if self._cache_db is None:
             return
         try:
             self._db.close(save=True)
@@ -209,7 +223,10 @@ class IdaSession:
                 "format": self._db.format or "unknown",
                 "class": self._db.format or "unknown",
                 "type": self._db.format or "unknown",
-            }
+            },
+            "tocode": {
+                "input_path": str(self._input_path()),
+            },
         }
 
     def entries(self) -> list[dict[str, Any]]:
@@ -568,6 +585,15 @@ class IdaSession:
             if isinstance(contents, bytes):
                 return contents.decode("utf-8", errors="replace")
             return str(contents)
+
+    def _input_path(self) -> Path:
+        if self._ida_nalt is None:
+            return self.binary
+        try:
+            path = Path(str(self._ida_nalt.get_input_file_path())).expanduser()
+        except Exception:  # noqa: BLE001
+            return self.binary
+        return path.resolve() if path.is_file() else self.binary
 
     def _function_disassembly(self, func):
         try:

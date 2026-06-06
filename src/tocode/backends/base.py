@@ -13,6 +13,7 @@ from ..errors import ToCodeError
 
 BackendRequest = Literal["auto", "ida", "r2"]
 BackendName = Literal["ida", "r2"]
+IDA_DATABASE_SUFFIXES = frozenset({".i64", ".idb"})
 
 
 class DecompilerSession(Protocol):
@@ -75,9 +76,15 @@ class BackendChoice:
 def choose_backend(
     requested: BackendRequest,
     *,
+    input_path: Path | None = None,
     idadir: Path | None = None,
     ida_domain_path: Path | None = None,
 ) -> BackendChoice:
+    if input_path is not None and is_ida_database(input_path):
+        if requested == "r2":
+            raise ToCodeError("IDA database input requires the IDA backend")
+        requested = "ida"
+
     if requested == "r2":
         return BackendChoice(requested, "r2", "selected by CLI")
 
@@ -90,6 +97,10 @@ def choose_backend(
     if probe.available:
         return BackendChoice(requested, "ida", probe.reason)
     return BackendChoice(requested, "r2", f"IDA unavailable ({probe.reason}); using r2")
+
+
+def is_ida_database(path: Path) -> bool:
+    return path.suffix.lower() in IDA_DATABASE_SUFFIXES
 
 
 @dataclass(slots=True)
@@ -143,6 +154,14 @@ def discover_idadir(explicit: Path | None = None) -> Path | None:
     home = Path.home()
     candidates.extend(sorted(home.glob("ida-pro-*"), reverse=True))
     candidates.extend(sorted(home.glob("IDA*"), reverse=True))
+
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)"):
+        install_root = os.environ.get(env_name)
+        if not install_root:
+            continue
+        root = Path(install_root)
+        if root.is_dir():
+            candidates.extend(sorted(root.glob("IDA*"), reverse=True))
 
     applications = Path("/Applications")
     if applications.is_dir():

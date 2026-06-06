@@ -62,7 +62,6 @@ TINY_CLUSTER_FUNCTIONS = 2
 TINY_CLUSTER_BYTES = 0x80
 MERGED_CLUSTER_FUNCTIONS = 12
 MERGED_CLUSTER_BYTES = 0x800
-ASM_STUB_MAX_SIZE = 16
 TREE_CALLING_CONVENTION_RX = re.compile(
     r"\b__(?:cdecl|fastcall|stdcall|thiscall|usercall|userpurge|noreturn)\b"
 )
@@ -111,6 +110,7 @@ class ExportContext:
     function_index: Path | None = None
     tree_index: Path | None = None
     manifest: Path | None = None
+    ida_database: Path | None = None
     worker_count: int = 1
     requested_jobs: int | None = None
     render_mode: str = "single"
@@ -142,7 +142,7 @@ def export_binary(
     out_dir: Path | None = None,
     progress: Progress | None = None,
     jobs: int | None = None,
-    tree: bool = True,
+    tree: bool = False,
 ) -> ExportSummary:
     progress = progress or analyzer.progress
     context = ExportContext(
@@ -225,10 +225,10 @@ def _render(context: ExportContext) -> None:
     else:
         context.worker_count = 1
         context.render_mode = "single"
-        context.progress.log(f"render: single session ({context.analyzer.backend_label})")
+        context.progress.log(f"Rendering with one {context.analyzer.backend_label} session")
 
     context.progress.log(
-        f"render: {count} functions, {len(context.clusters)} clusters, {context.analyzer.decompiler_label}"
+        f"Rendering {count} functions in {len(context.clusters)} clusters with {context.analyzer.decompiler_label}"
     )
     context.rendered = render_functions(
         analyzer=context.analyzer,
@@ -241,7 +241,7 @@ def _render(context: ExportContext) -> None:
 
 
 def _write_raw(context: ExportContext) -> None:
-    context.progress.log("write: source, asm, metadata")
+    context.progress.log("Writing raw source, assembly, and summaries")
     written = write_source_tree(
         analysis=_need(context.analysis),
         clusters=context.clusters,
@@ -263,7 +263,7 @@ def _write_raw(context: ExportContext) -> None:
 
 
 def _write_tree(context: ExportContext) -> None:
-    context.progress.log("write: tree source")
+    context.progress.log("Writing tree-sitter friendly source")
     worker_count = choose_jobs(
         function_count=len(context.clusters),
         analysis_seconds=0.0,
@@ -272,7 +272,7 @@ def _write_tree(context: ExportContext) -> None:
     )
     if worker_count > 1:
         context.progress.log(
-            f"jobs: opening {worker_count} tree workers for {len(context.clusters)} clusters"
+            f"Opening {worker_count} tree workers for {len(context.clusters)} clusters"
         )
     written = write_tree_sources(
         analysis=_need(context.analysis),
@@ -389,7 +389,7 @@ def write_tree_sources(
             )
         except Exception as exc:  # noqa: BLE001
             if progress:
-                progress.log(f"warning: tree writer workers failed ({exc}); retrying in-process")
+                progress.log(f"Warning: tree writer workers failed ({exc}); retrying in-process")
 
     bar_context = (
         progress.bar(total=len(jobs), desc="writing tree", unit="cluster") if progress else nullcontext()
@@ -638,7 +638,7 @@ def render_functions(
     try:
         return _render_parallel(analyzer, analysis, addresses, names, progress, worker_count)
     except Exception as exc:  # noqa: BLE001
-        progress.log(f"warning: parallel export failed ({exc}); retrying with the primary session")
+        progress.log(f"Warning: parallel export failed ({exc}); retrying with the primary session")
         return _render_serial(analyzer, analysis, addresses, names, progress)
 
 
@@ -665,7 +665,7 @@ def _render_parallel(
     progress: Progress,
     worker_count: int,
 ) -> dict[int, RenderedFunction]:
-    progress.log(f"jobs: opening {worker_count} workers for {len(addresses)} functions")
+    progress.log(f"Opening {worker_count} workers for {len(addresses)} functions")
     analyzer.prepare_parallel_workers()
     spec = _worker_spec(analyzer)
     output: dict[int, RenderedFunction] = {}
@@ -687,7 +687,7 @@ def _render_parallel(
                     pending.discard(address)
                     bar.update(1)
         except BrokenProcessPool as exc:
-            progress.log(f"warning: worker process exited unexpectedly ({exc}); retrying remaining functions")
+            progress.log(f"Warning: worker process exited unexpectedly ({exc}); retrying remaining functions")
         for address in sorted(pending, key=addresses.index):
             output[address] = _render_isolated(spec, analysis, address, names)
             bar.update(1)
@@ -702,8 +702,15 @@ def _worker_spec(analyzer: BinaryAnalyzer) -> WorkerSpec:
         analysis_command=getattr(session, "analysis_command", None),
         idadir=getattr(session, "idadir", None),
         ida_domain_path=getattr(session, "ida_domain_path", None),
-        db_path=getattr(session, "_cache_db", None),
+        db_path=_session_database_path(session),
     )
+
+
+def _session_database_path(session: object) -> Path | None:
+    database_path = getattr(session, "database_path", None)
+    if callable(database_path):
+        return database_path()
+    return getattr(session, "_cache_db", None)
 
 
 def _init_worker(spec: WorkerSpec, analysis: ProgramAnalysis, names: NameBook) -> None:
@@ -791,7 +798,7 @@ def render_one(session_like, analysis: ProgramAnalysis, routine: Routine, names:
     try:
         disasm = session_like.disasm(routine.address).rstrip()
         summary = session_like.function_summary(routine.address).rstrip()
-        if routine.size <= ASM_STUB_MAX_SIZE:
+        if routine.thunk:
             prototype = fallback_prototype(routine, analysis.binary.pointer_size, names)
             c_text = asm_stub(routine, prototype)
         else:
@@ -839,11 +846,12 @@ def _failure_stub(
 
 def fallback_prototype(routine: Routine, pointer_size: int, names: NameBook) -> str:
     signature = (routine.signature or "").strip().rstrip(";")
-    parsed = parse_signature(signature) if signature else None
+    function_name = names.function_name(routine.address, routine.name)
+    parsed = parse_signature(signature, fallback_name=function_name) if signature else None
     if parsed is not None:
         return parsed
     default = "undefined8" if pointer_size >= 8 else "undefined4"
-    return f"{default} {names.function_name(routine.address, routine.name)}()"
+    return f"{default} {function_name}()"
 
 
 def import_prototype(name: str, pointer_size: int) -> str:
@@ -851,7 +859,7 @@ def import_prototype(name: str, pointer_size: int) -> str:
     return f"{default} {clean_c_identifier(name)}()"
 
 
-def parse_signature(signature: str) -> str | None:
+def parse_signature(signature: str, *, fallback_name: str | None = None) -> str | None:
     before, sep, after = signature.partition("(")
     if not sep:
         return None
@@ -867,8 +875,12 @@ def parse_signature(signature: str) -> str | None:
         return None
     pointer_prefix = "*" * (len(raw_name) - len(raw_name.lstrip("*")))
     name = clean_c_identifier(raw_name.lstrip("*"))
-    ret = (ret + " " + pointer_prefix).strip() if ret else "undefined8"
     params = after.rsplit(")", 1)[0].strip()
+    if not ret and fallback_name is not None:
+        ret = clean_c_identifier(raw_name)
+        name = clean_c_identifier(fallback_name)
+    else:
+        ret = (ret + " " + pointer_prefix).strip() if ret else "undefined8"
     return f"{ret} {name}({params})" if params else f"{ret} {name}()"
 
 
@@ -1024,12 +1036,31 @@ def _write_metadata(context: ExportContext) -> None:
     write_json(root / "reachable.json", reachable)
     write_json(root / "cluster-graph.json", cluster_graph_json(analysis, context.clusters, context.raw_ranges))
     write_json(root / "triage.json", triage_json(analysis, context.clusters, context.raw_ranges, reachable))
+    context.ida_database = publish_backend_database(context)
     write_project_json(context)
     (root / "AGENTS.md").write_text(
         build_export_agents(analysis, context.header_name, tree_enabled=context.tree_enabled),
         encoding="utf-8",
     )
     context.manifest = write_manifest(context)
+
+
+def publish_backend_database(context: ExportContext) -> Path | None:
+    session = getattr(context.analyzer, "session", None)
+    database_path = getattr(session, "database_path", None)
+    if not callable(database_path):
+        return None
+    source = database_path()
+    if source is None or not source.is_file():
+        return None
+    analysis = _need(context.analysis)
+    root = _need(context.root)
+    suffix = source.suffix.lower()
+    target = root / f"{clean_path_component(analysis.binary.path.stem)}{suffix}"
+    if source.resolve() != target.resolve():
+        shutil.copy2(source, target)
+    context.progress.log(f"Saved IDA database to {target}")
+    return target.resolve()
 
 
 def build_header(analysis: ProgramAnalysis, prototypes: dict[int, str], names: NameBook) -> str:
@@ -1154,6 +1185,7 @@ def write_project_json(context: ExportContext) -> None:
             "data_dir": str(_need(context.data_dir).resolve()),
             "header": str(_need(context.header_path).resolve()),
             "agents": str((root / "AGENTS.md").resolve()),
+            "ida_database": str(context.ida_database) if context.ida_database is not None else None,
             "source_files": [str(item) for item in context.raw_sources],
             "tree_source_files": [str(item) for item in context.tree_sources],
             "summary_files": [str(item) for item in context.summary_files],
@@ -1186,6 +1218,7 @@ def write_manifest(context: ExportContext) -> Path:
             "bits": analysis.binary.bits,
             "entrypoints": [f"0x{item:x}" for item in analysis.binary.entrypoints],
             "header": str(_need(context.header_path).resolve()),
+            "ida_database": str(context.ida_database) if context.ida_database is not None else None,
             "source_files": [str(item) for item in context.raw_sources],
             "raw_source_files": [str(item) for item in context.raw_sources],
             "tree_source_files": [str(item) for item in context.tree_sources],
@@ -1238,8 +1271,9 @@ def build_export_agents(analysis: ProgramAnalysis, header_name: str, *, tree_ena
         "",
         "## Mission",
         "",
-        "Discover what this software does and write a factual markdown report named `REPORT.md` in the project root.",
-        "Do not refactor or modify the generated export except for that report.",
+        "Reverse the binary, answer user questions, or serve as an oracle/helper to the user regarding this recovered source code.",
+        "Write a report only when the user asks for one; otherwise keep findings focused on the question or task at hand.",
+        "Do not refactor or modify the generated export unless the user explicitly asks for edits.",
         "Use subagents only for narrow evidence-gathering tasks such as strings, entrypoint paths, or one cluster family.",
         "",
         "## Files",
@@ -1251,7 +1285,7 @@ def build_export_agents(analysis: ProgramAnalysis, header_name: str, *, tree_ena
         f"- `data/*.bin`: raw section payloads from the original binary. Example files: {examples or '`data/*.bin`'}",
         "- `data/variables.json`: section manifest plus recovered strings, symbols, relocations, and data labels.",
         "- `data/variables_interesting.json`: globals and pointers worth checking early.",
-        "- `triage.json`: first-read summary with entry clusters, strings of interest, and packing/evasion hints.",
+        "- `triage.json`: first-read summary with entry clusters, sections, counts, and strings of interest.",
         "- `imports.json` and `exports.json`: structured import/export tables.",
         "- `reachable.json`: entrypoint/export reachability depths and unreachable count.",
         "- `cluster-graph.json`: inter-cluster call graph.",
@@ -1259,6 +1293,7 @@ def build_export_agents(analysis: ProgramAnalysis, header_name: str, *, tree_ena
         "- `function-index.json`: exact raw source and ASM line mappings for each exported function.",
         "- `sections.json`, `strings.json`, and `relocations.json`: layout and reference metadata.",
         "- `project.json` and `export-manifest.json`: top-level export paths and artifact inventory.",
+        "- `<binary>.i64` or `<binary>.idb`: exported IDA database when the IDA backend was used.",
         "",
         "## Working Style",
         "",

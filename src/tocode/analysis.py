@@ -30,7 +30,7 @@ class BinaryAnalyzer:
         self.progress = progress or Progress()
         self.analysis: ProgramAnalysis | None = None
         self.analysis_seconds: float | None = None
-        self.progress.log(f"input: {self.binary}")
+        self.progress.log(f"Loading {self.binary}")
 
     @property
     def backend_name(self) -> str:
@@ -60,7 +60,7 @@ class BinaryAnalyzer:
     def collect(self) -> ProgramAnalysis:
         started = time.monotonic()
         label = self.session.analysis_command or f"{self.session.backend_label} auto-analysis"
-        self.progress.log(f"analyze: {label}")
+        self.progress.log(f"Analyzing with {label}")
         with self.progress.bar(total=15, desc="analyze", unit="step") as bar:
             self.session.analyze()
             bar.update(1)
@@ -122,7 +122,7 @@ class BinaryAnalyzer:
         self.analysis = analysis
         self.analysis_seconds = time.monotonic() - started
         self.progress.log(
-            f"inventory: functions={len(routines)} imports={len(imports)} "
+            f"Inventory: functions={len(routines)} imports={len(imports)} "
             f"sections={len(segments)} time={self.analysis_seconds:.2f}s"
         )
         return analysis
@@ -150,8 +150,16 @@ class BinaryAnalyzer:
 
     def _binary_facts(self, info: dict[str, Any], entries: list[dict[str, Any]]) -> BinaryFacts:
         binary = info.get("bin", {})
+        tocode = info.get("tocode", {})
+        source_path = self.binary
+        if isinstance(tocode, dict):
+            raw_path = _first_text(tocode, "input_path")
+            if raw_path:
+                candidate = Path(raw_path).expanduser()
+                if candidate.is_file():
+                    source_path = candidate.resolve()
         return BinaryFacts(
-            path=self.binary,
+            path=source_path,
             arch=str(binary.get("arch", "unknown")),
             bits=int(binary.get("bits", 0) or 0),
             image_base=int(binary.get("baddr", 0) or 0),
@@ -354,9 +362,14 @@ def create_analyzer(
     idadir: Path | None = None,
     ida_domain_path: Path | None = None,
 ) -> BinaryAnalyzer:
-    choice = choose_backend(backend, idadir=idadir, ida_domain_path=ida_domain_path)
+    choice = choose_backend(
+        backend,
+        input_path=binary,
+        idadir=idadir,
+        ida_domain_path=ida_domain_path,
+    )
     if progress is not None:
-        progress.log(f"backend: {choice.selected} ({choice.reason})")
+        progress.log(f"Using {choice.selected.upper()} as backend.")
     if choice.selected == "ida":
         return BinaryAnalyzer(
             binary,

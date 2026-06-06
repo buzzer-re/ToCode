@@ -112,6 +112,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "ida-domain" },
+    { name = "idapro" },
     { name = "r2pipe" },
     { name = "tqdm" },
 ]
@@ -124,6 +125,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "ida-domain", specifier = ">=0.5.0" },
+    { name = "idapro", specifier = ">=0.0.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,<9" },
     { name = "r2pipe", specifier = ">=1.9.8,<2" },
     { name = "tqdm", specifier = ">=4.66,<5" },

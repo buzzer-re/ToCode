@@ -1,13 +1,13 @@
 # AGENTS
 
-This repository contains ToCode, a Python-only binary exporter. ToCode takes one binary path and writes one source-like project directory for reverse-engineering agents.
+This repository contains ToCode, a Python-only binary exporter. ToCode takes one binary or IDA database path and writes one source-like project directory for reverse-engineering agents.
 
 ## Scope
 
 - Keep the project focused on the exporter CLI and Python library modules.
 - Do not add web UI, server, container wrapper, shortcut, installer, or background service behavior.
 - Do not add chat, report generation, or secondary analysis stages.
-- Export one project tree from one binary: scanner-friendly C, raw decompiler output, assembly, summaries, section data, and JSON metadata.
+- Export one project tree from one binary or IDA database: raw decompiler output, assembly, summaries, section data, JSON metadata, optional IDA database, and optional scanner-friendly C.
 - Generated export trees must include their own `AGENTS.md` for agents analyzing that exported binary.
 
 ## Project Layout
@@ -24,10 +24,9 @@ This repository contains ToCode, a Python-only binary exporter. ToCode takes one
 
 ## Export Contract
 
-The CLI accepts a regular binary file and writes a project directory containing:
+The CLI accepts a regular binary file or IDA database and writes a project directory containing:
 
 - `src/raw/**/*.c`
-- `src/tree/**/*.c`
 - `src/raw/**/*.asm`
 - `src/raw/**/*.summary`
 - `include/*.h`
@@ -35,7 +34,6 @@ The CLI accepts a regular binary file and writes a project directory containing:
 - `data/variables.json`
 - `data/variables_interesting.json`
 - `function-index.json`
-- `function-index-tree.json`
 - `functions.json`
 - `sections.json`
 - `strings.json`
@@ -48,6 +46,15 @@ The CLI accepts a regular binary file and writes a project directory containing:
 - `project.json`
 - `export-manifest.json`
 - generated export `AGENTS.md`
+
+When the IDA backend is used, the export also contains:
+
+- `<binary>.i64` or `<binary>.idb`
+
+When `--tree` is passed, the export also contains:
+
+- `src/tree/**/*.c`
+- `function-index-tree.json`
 
 ## Development
 
@@ -70,14 +77,14 @@ The CLI accepts a regular binary file and writes a project directory containing:
 Run focused checks after changes:
 
 ```bash
-$HOME/.local/bin/uv run --extra dev pytest -q
+uv run --extra dev pytest -q
 python3 -m compileall src tests
 ```
 
 For backend-sensitive changes, also run a real export when IDA is available:
 
 ```bash
-$HOME/.local/bin/uv run tocode /bin/true -o /tmp/tocode-check --backend auto -j 2
+uv run tocode /bin/true -o /tmp/tocode-check --backend auto -j 2
 ```
 
 Confirm the generated project matches the export contract above.

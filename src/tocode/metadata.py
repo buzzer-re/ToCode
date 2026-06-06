@@ -29,7 +29,6 @@ def imports_json(analysis: ProgramAnalysis) -> dict[str, object]:
             {"dll": dll, "functions": functions}
             for dll, functions in sorted(grouped.items(), key=lambda value: value[0].lower())
         ],
-        "dynamic_resolution_candidates": dynamic_api_candidates(analysis),
     }
 
 
@@ -238,11 +237,6 @@ def triage_json(
         "export_count": len(analysis.exports),
         "import_count": len(analysis.imports),
         "strings_of_interest": interesting_strings(analysis)[:50],
-        "dynamic_api_resolution": evasion_flags(analysis)["dynamic_api_resolution"],
-        "has_debug_strings": has_debug_strings(analysis),
-        "embedded_pe": has_embedded_pe(analysis),
-        "embedded_shellcode_hint": shellcode_hint(analysis),
-        "evasion": evasion_flags(analysis),
         "reachable_count": len(reachable_doc.get("reachable", [])),
         "unreachable_count": reachable_doc.get("unreachable_count", 0),
     }
@@ -528,49 +522,6 @@ def interesting_strings(analysis: ProgramAnalysis) -> list[dict[str, object]]:
     ]
 
 
-def evasion_flags(analysis: ProgramAnalysis) -> dict[str, bool]:
-    imports = {api_name(item.name).lower() for item in analysis.imports.values()}
-    strings = [item.value.lower() for item in analysis.strings]
-    forwarders = [
-        item.forwarder_target or inferred_forwarder(analysis, item) or ""
-        for item in analysis.exports
-        if item.forwarder or inferred_forwarder(analysis, item) is not None
-    ]
-    injection = bool(
-        imports
-        & {
-            "virtualallocex",
-            "ntallocatevirtualmemory",
-            "writeprocessmemory",
-            "ntwritevirtualmemory",
-            "createremotethread",
-        }
-    )
-    thread_ctx = bool(imports & {"createprocessa", "createprocessw", "ntsetcontextthread", "setthreadcontext"})
-    return {
-        "dynamic_api_resolution": "getprocaddress" in imports,
-        "direct_nt_api_calls": any(name.startswith(("nt", "zw")) for name in imports),
-        "string_obfuscation": encoded_strings_hint(analysis),
-        "anti_debug": bool(imports & {"isdebuggerpresent", "checkremotedebuggerpresent"}),
-        "anti_vm": any("vmware" in value or "vbox" in value or "virtualbox" in value for value in strings),
-        "process_injection": injection,
-        "process_hollowing": injection and thread_ctx,
-        "dll_sideloading": binary_type(analysis) == "DLL"
-        and any(".old" in target.lower() or ".dll" in target.lower() for target in forwarders),
-    }
-
-
-def dynamic_api_candidates(analysis: ProgramAnalysis) -> list[dict[str, object]]:
-    if not any(api_name(item.name).lower() == "getprocaddress" for item in analysis.imports.values()):
-        return []
-    values = [
-        item.value
-        for item in analysis.strings
-        if re.match(r"^(Nt|Zw|Create|Virtual|Write|Read|Load|Get|Set|Open|Reg)[A-Za-z0-9_]+$", item.value)
-    ]
-    return [{"name": value} for value in sorted(set(values))]
-
-
 def entry_seeds(analysis: ProgramAnalysis) -> list[int]:
     seeds: list[int] = []
     for address in analysis.binary.entrypoints:
@@ -634,42 +585,6 @@ def guess_packed(analysis: ProgramAnalysis) -> bool:
         [segment for segment in executable if (section_entropy(analysis, segment) or 0.0) >= 7.2]
         and len(analysis.imports) <= 5
     )
-
-
-def has_debug_strings(analysis: ProgramAnalysis) -> bool:
-    return any(
-        "debug" in item.value.lower() or "pdb" in item.value.lower() or "assert" in item.value.lower()
-        for item in analysis.strings
-    )
-
-
-def has_embedded_pe(analysis: ProgramAnalysis) -> bool:
-    try:
-        blob = analysis.binary.path.read_bytes()
-    except OSError:
-        return False
-    first = blob.find(b"MZ")
-    return first != -1 and blob.find(b"MZ", first + 2) != -1
-
-
-def shellcode_hint(analysis: ProgramAnalysis) -> bool:
-    return any(
-        segment.readable and segment.writable and (section_entropy(analysis, segment) or 0.0) >= 6.8 and segment.size >= 256
-        for segment in analysis.segments
-    )
-
-
-def encoded_strings_hint(analysis: ProgramAnalysis) -> bool:
-    if len(analysis.strings) >= 10:
-        return False
-    text = " ".join([*(item.name for item in analysis.imports.values()), *(item.value for item in analysis.strings)]).lower()
-    return any(token in text for token in ("crypt", "decode", "decrypt", "base64", "xor"))
-
-
-def api_name(name: str) -> str:
-    text = name.rsplit("!", 1)[-1]
-    text = text.rsplit(".", 1)[-1] if text.startswith(("sym.imp.", "loc.imp.")) else text
-    return text.removeprefix("__imp_").removeprefix("imp_").strip()
 
 
 def looks_written(line: str) -> bool:

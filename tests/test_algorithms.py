@@ -1,4 +1,8 @@
+import pytest
+
+from tocode.backends.base import choose_backend, discover_idadir
 from tocode.cluster import cluster_routines
+from tocode.errors import ToCodeError
 from tocode.naming import SHARED_CLUSTER_ID, clean_c_identifier, clean_path_component
 from tocode.parallel import choose_jobs
 
@@ -44,3 +48,22 @@ def test_requested_jobs_are_limited_by_function_count() -> None:
 def test_name_sanitizers_are_c_and_path_safe() -> None:
     assert clean_c_identifier("123 bad-name") == "fn_123_bad_name"
     assert clean_path_component("../bad name!") == "bad_name"
+
+
+def test_discover_idadir_checks_windows_program_files(tmp_path, monkeypatch) -> None:
+    install = tmp_path / "IDA Professional 9.2"
+    (install / "idalib").mkdir(parents=True)
+
+    monkeypatch.delenv("IDADIR", raising=False)
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+
+    assert discover_idadir() == install.resolve()
+
+
+def test_ida_database_input_rejects_r2_backend(tmp_path) -> None:
+    db_path = tmp_path / "sample.idb"
+    db_path.write_bytes(b"IDA")
+
+    with pytest.raises(ToCodeError):
+        choose_backend("r2", input_path=db_path)

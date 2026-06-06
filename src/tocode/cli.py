@@ -74,11 +74,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Worker sessions for decompilation: positive integer or 'auto' (default: auto).",
     )
     parser.add_argument(
-        "--no-tree",
+        "--tree",
         action="store_true",
-        help="Skip Semgrep/tree-sitter friendly source under src/tree.",
+        help="Also write tree-sitter/Semgrep friendly source under src/tree.",
     )
     parser.add_argument(
+        "-q",
         "--quiet",
         action="store_true",
         help="Disable status logging.",
@@ -103,11 +104,12 @@ def main(argv: list[str] | None = None) -> int:
     except ToCodeError as exc:
         print(f"tocode: {exc}", file=sys.stderr)
         return 1
-    print(f"project: {summary.root_dir}")
-    print(
-        f"summary: functions={summary.function_count} "
-        f"clusters={summary.cluster_count} failures={len(summary.failed_functions)}"
-    )
+    if not args.quiet:
+        print(f"Project: {summary.root_dir}")
+        print(
+            f"Summary: functions={summary.function_count} "
+            f"clusters={summary.cluster_count} failures={len(summary.failed_functions)}"
+        )
     return 0
 
 
@@ -127,5 +129,5 @@ def _run_one(
             out_dir=out_dir,
             progress=progress,
             jobs=args.jobs,
-            tree=not args.no_tree,
+            tree=args.tree,
         )
