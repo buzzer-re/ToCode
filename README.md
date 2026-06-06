@@ -8,13 +8,13 @@ tocode ./sample.bin -o ./sample_decompiler
 
 ## Why
 
-Most recent AI models are strong at coding, especially when they can traverse large codebases and accumulate context with subagents and other strategies. When we use these agents to assist with reverse engineering, we usually provide tools through MCP or other means so the coding agent can learn and build strategies around tools such as IDA and r2. This approach adds limitations and constraints to how the agent behaves, and it increases the need for deep, complex reasoning. There should be a better way to improve this scenario so even smaller models can perform well on this kind of work.
+Modern AI models are strong at coding, especially when they can traverse large codebases and accumulate context with subagents and other strategies. When we use these agents to assist with reverse engineering, we usually provide tools through MCP or other means so the coding agent can learn and build strategies around tools such as IDA and r2. This approach adds limitations and constraints to how the agent behaves, and it increases the need for deep, complex reasoning. There should be a better way to improve this scenario so that even smaller models can perform well on this kind of work.
 
 The idea behind ToCode is simple: use a disassembler such as IDA to create a source-code-like project for a given binary, with a pre-built `AGENTS.md` so most coding agents start with precomputed context. ToCode also produces rich `.json` files with important metadata. The goal is to provide exactly what coding agents are good at working with: code.
 
 ### Export layout
 
-The exported binary contains the following structure:
+The exported project contains the following structure:
 
 ```text
 sample_decompiler/
@@ -50,35 +50,46 @@ sample_decompiler/
 | `AGENTS.md` / `CLAUDE.md` | Instructions for agents analyzing the exported binary. |
 | `src/tree` | Optional scanner-friendly C output when `--tree` is used. |
 
-### Example
-
-As an example, we can see how even smaller models can solve crackmes. The following example was taken from the [binary cartography](https://github.com/mrphrazer/binary-cartography) repository by [mrphrazer](https://github.com/mrphrazer):
-
-#### 1 - Decompile the crackme
-
-
-
-#### 2 - Point your coding agent and ask it to solve 
-
-
 
 ### Supported backends
 
 Currently, IDA (using the ida-domain/idapro Python libraries) and radare2 are supported. Other disassemblers may be added in the future.
 
-### Installing
+### Using
 
-Install ToCode from PyPI:
 
-```bash
-pip install tocode-cli
-```
-
-Then run it with the `tocode` command:
+ToCode supports Windows/Linux/MacOS setups with Python >= 3.10 setup, Install ToCode locally with:
 
 ```bash
-tocode ./sample.bin -o ./sample_decompiler
+git clone https://github.com/buzzer-re/ToCode
+pip install -e . # or python3 -m pip install -e .
+tocode # Make sure Python scripts are on your PATH
 ```
+
+Using ToCode with `uv`:
+
+```
+git clone https://github.com/buzzer-re/ToCode && cd ToCode
+uv sync
+uv run tocode # From the same folder
+```
+
+### Example
+
+```
+tocode firmwareX.bin -o firmwareX_decompiled/
+cd firmwareX_decompiled/
+codex 
+
+# Inside your agent shell, type your goals, e.g.: "Give me a brief overview of the boot process of this firmware."
+``` 
+
+#### From an ongoing RE work
+```
+tocode firmwareX.bin.i64 -o -o firmwareX_decompiled/
+...
+```
+
 
 
 ## Development
