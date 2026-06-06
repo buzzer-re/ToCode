@@ -57,21 +57,29 @@ Currently, IDA (using the ida-domain/idapro Python libraries) and radare2 are su
 
 ### Using
 
+ToCode supports Windows, Linux, and macOS with Python 3.10 or newer.
 
-ToCode supports Windows/Linux/MacOS setups with Python >= 3.10 setup, Install ToCode locally with:
+On Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+On Linux or macOS:
+
+```bash
+bash ./install.sh
+```
+
+The installer clones or updates ToCode and installs the `tocode` command. If `uv` is already available, the installer uses it; otherwise, it uses your existing Python/pip.
+
+Manual setup:
 
 ```bash
 git clone https://github.com/buzzer-re/ToCode
-pip install -e . # or python3 -m pip install -e .
-tocode # Make sure Python scripts are on your PATH
-```
-
-Using ToCode with `uv`:
-
-```
-git clone https://github.com/buzzer-re/ToCode && cd ToCode
+cd ToCode
 uv sync
-uv run tocode # From the same folder
+uv tool install --force --editable .
 ```
 
 ### Example
@@ -86,7 +94,7 @@ codex
 
 #### From an ongoing RE work
 ```
-tocode firmwareX.bin.i64 -o -o firmwareX_decompiled/
+tocode firmwareX.bin.i64 -o firmwareX_decompiled/
 ...
 ```
 
