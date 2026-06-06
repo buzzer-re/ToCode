@@ -8,9 +8,13 @@ tocode ./sample.bin -o ./sample_decompiler
 
 ## Why
 
-Modern AI models are strong at coding, especially when they can traverse large codebases and accumulate context with subagents and other strategies. When we use these agents to assist with reverse engineering, we usually provide tools through MCP or other means so the coding agent can learn and build strategies around tools such as IDA and r2. This approach adds limitations and constraints to how the agent behaves, and it increases the need for deep, complex reasoning. There should be a better way to improve this scenario so that even smaller models can perform well on this kind of work.
+AI models are strong at coding, especially when they can traverse large codebases and accumulate context with subagents and other strategies. When we use these agents to assist with reverse engineering, we usually provide tools through MCP or other means so the coding agent can learn and build strategies around tools such as IDA and r2. This approach adds limitations and constraints to how the agent behaves, and it increases the need for deep, complex reasoning.
 
-The idea behind ToCode is simple: use a disassembler such as IDA to create a source-code-like project for a given binary, with a pre-built `AGENTS.md` so most coding agents start with precomputed context. ToCode also produces rich `.json` files with important metadata. The goal is to provide exactly what coding agents are good at working with: code.
+There should be a better way to improve this scenario so that even smaller models can perform well on this kind of work.
+
+The idea behind ToCode is simple: use a disassembler such as IDA to create a source-code-like project for a given binary, with a pre-built `AGENTS.md` so most coding agents start with precomputed context. ToCode also produces rich `.json` files with important metadata.
+
+With this approach, even tiny models can perform well without being connected to MCP-like tool calls, because ToCode provides exactly what coding agents are good at working with: code.
 
 ### Export layout
 
@@ -71,9 +75,7 @@ On Linux or macOS:
 bash ./install.sh
 ```
 
-The installer clones or updates ToCode and installs the `tocode` command. If `uv` is already available, the installer uses it; otherwise, it uses your existing Python/pip.
-
-Manual setup:
+Manual setup (requires [uv](https://docs.astral.sh/uv/)):
 
 ```bash
 git clone https://github.com/buzzer-re/ToCode

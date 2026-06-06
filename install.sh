@@ -43,6 +43,53 @@ find_python() {
   return 1
 }
 
+path_contains() {
+  case ":$PATH:" in
+    *":$1:"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+shell_rc_file() {
+  shell_name="$(basename "${SHELL:-}")"
+  case "$shell_name" in
+    zsh) printf '%s\n' "$HOME/.zshrc" ;;
+    bash) printf '%s\n' "$HOME/.bashrc" ;;
+    ksh) printf '%s\n' "$HOME/.kshrc" ;;
+    *) printf '%s\n' "$HOME/.profile" ;;
+  esac
+}
+
+ensure_path() {
+  bin_dir="$1"
+  [ -n "$bin_dir" ] || return 0
+  mkdir -p "$bin_dir"
+
+  missing_from_path=false
+  if ! path_contains "$bin_dir"; then
+    missing_from_path=true
+    export PATH="$bin_dir:$PATH"
+  fi
+
+  if [ "$missing_from_path" = false ]; then
+    return 0
+  fi
+
+  rc_file="$(shell_rc_file)"
+  marker="# ToCode installer: add user Python/uv tools to PATH"
+  path_line="export PATH=\"$bin_dir:\$PATH\""
+
+  touch "$rc_file"
+  if ! grep -Fqs "$path_line" "$rc_file"; then
+    {
+      printf '\n%s\n' "$marker"
+      printf '%s\n' "$path_line"
+    } >>"$rc_file"
+    info "Added $bin_dir to $rc_file"
+    info "Open a new shell session, or run: source $rc_file"
+  fi
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dir)
@@ -101,9 +148,7 @@ if command -v uv >/dev/null 2>&1; then
 
   if ! command -v tocode >/dev/null 2>&1; then
     tool_bin="$(uv tool dir --bin 2>/dev/null || true)"
-    if [ -n "$tool_bin" ]; then
-      export PATH="$tool_bin:$PATH"
-    fi
+    ensure_path "$tool_bin"
   fi
 else
   python_bin="$(find_python || true)"
@@ -120,7 +165,7 @@ else
   fi
 
   user_bin="$("$python_bin" -c 'import os, site; print(os.path.join(site.USER_BASE, "bin"))')"
-  export PATH="$user_bin:$PATH"
+  ensure_path "$user_bin"
 fi
 
 command -v tocode >/dev/null 2>&1 || die "tocode was installed, but its bin directory is not on PATH"

@@ -55,6 +55,54 @@ function Get-PythonCommand {
     return $null
 }
 
+function Test-PathEntry {
+    param(
+        [string]$PathValue,
+        [string]$Entry
+    )
+
+    $parts = $PathValue -split ';' | Where-Object { $_ }
+    foreach ($part in $parts) {
+        if ($part.TrimEnd('\') -ieq $Entry.TrimEnd('\')) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Add-UserPath {
+    param([string]$BinDir)
+
+    if (-not $BinDir) {
+        return
+    }
+
+    if (-not (Test-Path $BinDir)) {
+        New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+    }
+
+    if (-not (Test-PathEntry -PathValue $env:PATH -Entry $BinDir)) {
+        $env:PATH = "$BinDir;$env:PATH"
+    }
+
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if (-not $userPath) {
+        $userPath = ""
+    }
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    if (-not $machinePath) {
+        $machinePath = ""
+    }
+
+    $missingFromPersistentPath = -not (Test-PathEntry -PathValue $userPath -Entry $BinDir) -and -not (Test-PathEntry -PathValue $machinePath -Entry $BinDir)
+    if ($missingFromPersistentPath) {
+        $newUserPath = if ($userPath) { "$userPath;$BinDir" } else { $BinDir }
+        [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+        Write-Step "Added $BinDir to your user Path"
+        Write-Host "Open a new PowerShell or cmd session before running tocode outside this installer."
+    }
+}
+
 if (-not (Test-Command "git")) {
     Fail "git is required but was not found on PATH"
 }
@@ -89,7 +137,7 @@ if (Test-Command "uv") {
     if (-not (Test-Command "tocode")) {
         $toolBin = (& uv tool dir --bin 2>$null)
         if ($LASTEXITCODE -eq 0 -and $toolBin) {
-            $env:PATH = "$toolBin;$env:PATH"
+            Add-UserPath -BinDir $toolBin
         }
     }
 }
@@ -108,7 +156,7 @@ else {
 
     $userBase = (& $python.Name @($python.Args) -c "import site; print(site.USER_BASE)")
     if ($LASTEXITCODE -eq 0 -and $userBase) {
-        $env:PATH = "$(Join-Path $userBase 'Scripts');$env:PATH"
+        Add-UserPath -BinDir (Join-Path $userBase 'Scripts')
     }
 }
 
