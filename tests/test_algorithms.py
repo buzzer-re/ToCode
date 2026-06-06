@@ -1,8 +1,11 @@
+from pathlib import Path
+
 import pytest
 
 from tocode.backends.base import choose_backend, discover_idadir
+from tocode.backends.r2 import R2Session
 from tocode.cluster import cluster_routines
-from tocode.errors import ToCodeError
+from tocode.errors import BackendError, ToCodeError
 from tocode.naming import SHARED_CLUSTER_ID, clean_c_identifier, clean_path_component
 from tocode.parallel import choose_jobs
 
@@ -61,6 +64,7 @@ def test_discover_idadir_checks_windows_program_files(tmp_path, monkeypatch) -> 
     (install / "idalib").mkdir(parents=True)
 
     monkeypatch.delenv("IDADIR", raising=False)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
     monkeypatch.setenv("ProgramFiles", str(tmp_path))
     monkeypatch.delenv("ProgramFiles(x86)", raising=False)
 
@@ -73,3 +77,20 @@ def test_ida_database_input_rejects_r2_backend(tmp_path) -> None:
 
     with pytest.raises(ToCodeError):
         choose_backend("r2", input_path=db_path)
+
+
+def test_r2_decompiler_probe_reports_missing_sleigh() -> None:
+    class MissingSleighSession(R2Session):
+        def __init__(self) -> None:
+            pass
+
+        def cmd(self, command: str) -> str:
+            return {
+                "pdg?": "Usage: pdg",
+                "pdgL": "",
+            }[command]
+
+    session = MissingSleighSession()
+
+    with pytest.raises(BackendError, match="r2ghidra SLEIGH languages"):
+        session.ensure_decompiler()

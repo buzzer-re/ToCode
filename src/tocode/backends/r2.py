@@ -78,6 +78,17 @@ class R2Session:
         help_text = self.cmd("pdg?")
         if "Unknown command" in help_text or "Missing plugin" in help_text:
             raise BackendError("r2ghidra is not available to radare2")
+        if "Cannot find the sleigh home" in help_text:
+            raise BackendError(
+                "r2ghidra SLEIGH data is not available; install it with "
+                "`r2pm -ci r2ghidra-sleigh`"
+            )
+        languages = self.cmd("pdgL").strip()
+        if not languages:
+            raise BackendError(
+                "r2ghidra SLEIGH languages are not available; install them with "
+                "`r2pm -ci r2ghidra-sleigh`"
+            )
 
     def info(self) -> dict[str, Any]:
         return self.cmdj("ij") or {}

@@ -107,7 +107,7 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/00/68/1bd2e0d709f3b0d8e112f143797c92074e8b76ad6c1fb44e05420e085e4e/r2pipe-1.9.8.tar.gz", hash = "sha256:87ac3a69cd6466e330364bb47995bf49c2a87aadaf6497b9cd7fdd9dcf24c1df", size = 23828, upload-time = "2026-03-09T19:50:37.928Z" }
 
 [[package]]
-name = "tocode"
+name = "tocode-cli"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

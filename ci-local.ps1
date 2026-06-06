@@ -66,7 +66,7 @@ if (-not (Test-Command "uv")) {
     Add-Warn "uv not found; using current Python environment for tools"
 }
 
-Write-Step "[1/6] Ruff format"
+Write-Step "[1/5] Ruff format"
 if ($Fix) {
     Invoke-With -Packages @("ruff==0.15.13") python -m ruff format src tests
 } else {
@@ -78,7 +78,7 @@ if ($LASTEXITCODE -eq 0) {
     Add-Fail "ruff format" "run .\ci-local.ps1 -Fix"
 }
 
-Write-Step "[2/6] Ruff lint"
+Write-Step "[2/5] Ruff lint"
 if ($Fix) {
     Invoke-With -Packages @("ruff==0.15.13") python -m ruff check src tests --fix
 } else {
@@ -90,7 +90,7 @@ if ($LASTEXITCODE -eq 0) {
     Add-Fail "ruff lint" "see output above"
 }
 
-Write-Step "[3/6] Mypy focused core"
+Write-Step "[3/5] Mypy focused core"
 Invoke-With -Packages @("mypy==2.1.0", "tomli==2.4.1") python -m mypy src/tocode/cluster.py src/tocode/parallel.py src/tocode/schema.py tests/test_algorithms.py --pretty
 if ($LASTEXITCODE -eq 0) {
     Add-Pass "mypy"
@@ -98,7 +98,7 @@ if ($LASTEXITCODE -eq 0) {
     Add-Fail "mypy" "see output above"
 }
 
-Write-Step "[4/6] Pytest"
+Write-Step "[4/5] Pytest"
 Invoke-Tool --extra dev pytest -q
 if ($LASTEXITCODE -eq 0) {
     Add-Pass "pytest"
@@ -106,33 +106,12 @@ if ($LASTEXITCODE -eq 0) {
     Add-Fail "pytest" "see output above"
 }
 
-Write-Step "[5/6] Compile Python"
+Write-Step "[5/5] Compile Python"
 Invoke-Tool python -m compileall src tests
 if ($LASTEXITCODE -eq 0) {
     Add-Pass "compileall"
 } else {
     Add-Fail "compileall" "see output above"
-}
-
-Write-Step "[6/6] Desloppify objective scan (advisory)"
-if (Test-Command "uv") {
-    & uv run --with desloppify==0.9.3 desloppify scan --profile objective --no-badge
-    if ($LASTEXITCODE -eq 0) {
-        $Score = & python -c "import json; print(json.load(open('.desloppify/query.json')).get('objective_score', 0))"
-        Add-Warn "desloppify advisory score: $Score/100"
-    } else {
-        Add-Warn "desloppify failed, advisory only"
-    }
-} elseif (Test-Command "desloppify") {
-    & desloppify scan --profile objective --no-badge
-    if ($LASTEXITCODE -eq 0) {
-        $Score = & python -c "import json; print(json.load(open('.desloppify/query.json')).get('objective_score', 0))"
-        Add-Warn "desloppify advisory score: $Score/100"
-    } else {
-        Add-Warn "desloppify failed, advisory only"
-    }
-} else {
-    Add-Warn "desloppify unavailable, skipped"
 }
 
 Write-Host ""

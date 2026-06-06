@@ -145,7 +145,7 @@ if [[ -z "$UV_BIN" ]]; then
   }
 fi
 
-info "[1/6] Ruff format"
+info "[1/5] Ruff format"
 if "$FIX"; then
   if run_with ruff==0.15.13 python -m ruff format src tests; then
     ok "ruff format"
@@ -160,7 +160,7 @@ else
   fi
 fi
 
-info "[2/6] Ruff lint"
+info "[2/5] Ruff lint"
 if "$FIX"; then
   if run_with ruff==0.15.13 python -m ruff check src tests --fix; then
     ok "ruff lint"
@@ -175,7 +175,7 @@ else
   fi
 fi
 
-info "[3/6] Mypy focused core"
+info "[3/5] Mypy focused core"
 if run_with mypy==2.1.0 --with tomli==2.4.1 python -m mypy \
   src/tocode/cluster.py src/tocode/parallel.py src/tocode/schema.py tests/test_algorithms.py --pretty; then
   ok "mypy"
@@ -183,7 +183,7 @@ else
   fail "mypy" "see output above"
 fi
 
-info "[4/6] Pytest"
+info "[4/5] Pytest"
 if [[ -n "$UV_BIN" ]]; then
   TEST_CMD=(--extra dev pytest -q)
 else
@@ -195,7 +195,7 @@ else
   fail "pytest" "see output above"
 fi
 
-info "[5/6] Compile Python"
+info "[5/5] Compile Python"
 if [[ -n "$PYTHON_BIN" ]]; then
   COMPILE_CMD=("$PYTHON_BIN" -m compileall src tests)
 else
@@ -205,33 +205,6 @@ if "${COMPILE_CMD[@]}"; then
   ok "compileall"
 else
   fail "compileall" "see output above"
-fi
-
-info "[6/6] Desloppify objective scan (advisory)"
-if [[ -n "$UV_BIN" ]]; then
-  DESLOPPIFY=("$UV_BIN" run --with desloppify==0.9.3 desloppify)
-elif command -v desloppify >/dev/null 2>&1; then
-  DESLOPPIFY=(desloppify)
-else
-  DESLOPPIFY=()
-fi
-
-if [[ ${#DESLOPPIFY[@]} -eq 0 ]]; then
-  warn "desloppify unavailable, skipped"
-else
-  if "${DESLOPPIFY[@]}" scan --profile objective --no-badge; then
-    SCORE="$("${COMPILE_CMD[0]}" - <<'PY'
-import json
-try:
-    print(json.load(open('.desloppify/query.json')).get('objective_score', 0))
-except Exception:
-    print('unknown')
-PY
-)"
-    warn "desloppify advisory score: ${SCORE}/100"
-  else
-    warn "desloppify failed, advisory only"
-  fi
 fi
 
 echo ""

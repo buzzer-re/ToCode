@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tocode"
+name = "tocode-cli"
 version = "0.1.0"
 description = "Export compiled binaries as source-like projects for reverse engineering agents."
 readme = "README.md"
