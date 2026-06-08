@@ -36,7 +36,39 @@ def test_choose_jobs_caps_auto_ida_parallelism() -> None:
             cpu_count=32,
             job_limit=64,
         )
-        == 4
+        == 2
+    )
+
+
+def test_choose_jobs_limits_auto_ida_parallelism_by_available_memory() -> None:
+    assert (
+        choose_jobs(
+            function_count=300,
+            analysis_seconds=0.2,
+            requested=None,
+            backend="ida",
+            cpu_count=32,
+            job_limit=64,
+            available_memory_mb=3500,
+            ida_worker_memory_mb=4096,
+        )
+        == 1
+    )
+
+
+def test_requested_jobs_are_not_limited_by_available_memory() -> None:
+    assert (
+        choose_jobs(
+            function_count=300,
+            analysis_seconds=0.2,
+            requested=3,
+            backend="ida",
+            cpu_count=32,
+            job_limit=64,
+            available_memory_mb=3500,
+            ida_worker_memory_mb=4096,
+        )
+        == 3
     )
 
 

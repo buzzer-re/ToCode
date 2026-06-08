@@ -159,6 +159,21 @@ class BinaryAnalyzer:
         if callable(prepare):
             prepare()
 
+    def release_parallel_resources(self) -> None:
+        release = getattr(self.session, "release_parallel_resources", None)
+        if callable(release):
+            release()
+
+    def restore_parallel_resources(self) -> None:
+        restore = getattr(self.session, "restore_parallel_resources", None)
+        if callable(restore):
+            restore()
+
+    def release_render_memory(self) -> None:
+        release = getattr(self.session, "release_render_memory", None)
+        if callable(release):
+            release()
+
     def _binary_facts(
         self, info: dict[str, Any], entries: list[dict[str, Any]]
     ) -> BinaryFacts:
