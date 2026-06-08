@@ -525,9 +525,16 @@ def render_and_write_source_tree_parallel(
     total = sum(len(cluster.members) for cluster in clusters)
     if progress is not None:
         progress.log(f"Opening {worker_count} streaming workers for {total} functions")
+        progress.log("Preparing IDA worker database copies")
     analyzer.prepare_parallel_workers()
     spec = _worker_spec(analyzer)
+    if progress is not None:
+        progress.log("Closing parent backend session before workers open")
     analyzer.release_parallel_resources()
+    if progress is not None:
+        progress.log(
+            "Starting streaming worker processes; opening IDA databases may take a while"
+        )
 
     sources: list[Path] = []
     asm_files: list[Path] = []
@@ -548,7 +555,21 @@ def render_and_write_source_tree_parallel(
             initializer=_init_worker,
             initargs=(spec, analysis, names),
         ) as executor:
-            for cluster in clusters:
+            _wait_for_streaming_workers(
+                executor=executor,
+                worker_count=worker_count,
+                progress=progress,
+            )
+            cluster_total = len(clusters)
+            for cluster_index, cluster in enumerate(clusters, start=1):
+                if progress is not None:
+                    progress.log(
+                        _cluster_progress_message(
+                            cluster_index=cluster_index,
+                            cluster_total=cluster_total,
+                            cluster=cluster,
+                        )
+                    )
                 rendered: dict[int, RenderedFunction] = {}
                 futures = {
                     executor.submit(_render_in_worker, address): address
@@ -583,6 +604,38 @@ def render_and_write_source_tree_parallel(
         "failures": failures,
         "ranges": ranges,
     }
+
+
+def _wait_for_streaming_workers(
+    *,
+    executor: ProcessPoolExecutor,
+    worker_count: int,
+    progress: Progress | None,
+) -> None:
+    ready_futures = [executor.submit(_worker_ready) for _ in range(worker_count)]
+    bar_context = (
+        progress.bar(total=worker_count, desc="opening workers", unit="worker")
+        if progress
+        else nullcontext()
+    )
+    pids: set[int] = set()
+    with bar_context as bar:
+        for future in as_completed(ready_futures):
+            pids.add(future.result())
+            if bar is not None:
+                bar.update(1)
+    if progress is not None:
+        pid_text = ", ".join(str(pid) for pid in sorted(pids))
+        progress.log(f"Streaming workers ready: {pid_text}")
+
+
+def _cluster_progress_message(
+    *, cluster_index: int, cluster_total: int, cluster: Cluster
+) -> str:
+    return (
+        f"Rendering cluster {cluster_index}/{cluster_total}: "
+        f"{cluster.label} ({len(cluster.members)} functions)"
+    )
 
 
 def _write_rendered_cluster(
@@ -1091,6 +1144,12 @@ def _render_in_worker(address: int) -> tuple[int, RenderedFunction]:
     if callable(release_memory):
         release_memory()
     return address, result
+
+
+def _worker_ready() -> int:
+    if _WORKER_SESSION is None:
+        raise RuntimeError("render worker was not initialized")
+    return os.getpid()
 
 
 def _render_isolated(
