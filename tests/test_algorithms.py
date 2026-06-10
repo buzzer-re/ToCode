@@ -111,6 +111,34 @@ def test_requested_ida_jobs_are_capped_by_available_memory() -> None:
     )
 
 
+def test_ida_memory_model_is_env_tunable(monkeypatch) -> None:
+    def select() -> int:
+        return choose_jobs(
+            function_count=18000,
+            analysis_seconds=20.0,
+            requested=8,
+            backend="ida",
+            cpu_count=8,
+            job_limit=16,
+            available_memory_mb=6800,
+            database_size_mb=1900,
+        )
+
+    for name in (
+        "TOCODE_IDA_DB_RESIDENT_FACTOR",
+        "TOCODE_IDA_WORKER_BASE_MEMORY_MB",
+        "TOCODE_IDA_WORKER_MEMORY_MB",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    # Default model caps a 1.9 GB database on ~6.8 GB to a single worker.
+    assert select() == 1
+    # Operators can relax the model without code changes.
+    monkeypatch.setenv("TOCODE_IDA_DB_RESIDENT_FACTOR", "0")
+    monkeypatch.setenv("TOCODE_IDA_WORKER_BASE_MEMORY_MB", "0")
+    monkeypatch.setenv("TOCODE_IDA_WORKER_MEMORY_MB", "1024")
+    assert select() == 6  # 6800 // 1024
+
+
 def test_requested_jobs_ignore_memory_for_non_ida_backends() -> None:
     assert (
         choose_jobs(

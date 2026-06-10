@@ -14,8 +14,10 @@ DEFAULT_IDA_WORKER_MEMORY_MB = 3072
 # A worker loads the whole IDA database into memory. Estimate its resident cost
 # from the database size so that huge databases (kernels) do not over-subscribe
 # RAM. Base covers IDA runtime + Hex-Rays; the factor covers the loaded database.
-IDA_WORKER_BASE_MEMORY_MB = 768
-IDA_DB_RESIDENT_FACTOR = 1.5
+# Both are tunable defaults, not hardware-specific values: the resulting ceiling
+# is computed from the host's real available memory and the real database size.
+DEFAULT_IDA_WORKER_BASE_MEMORY_MB = 768
+DEFAULT_IDA_DB_RESIDENT_FACTOR = 1.5
 
 
 def choose_jobs(
@@ -74,8 +76,8 @@ def _ida_memory_ceiling(
         else configured_ida_worker_memory_mb()
     )
     if database_size_mb is not None and database_size_mb > 0:
-        estimated = IDA_WORKER_BASE_MEMORY_MB + int(
-            database_size_mb * IDA_DB_RESIDENT_FACTOR
+        estimated = configured_ida_worker_base_mb() + int(
+            database_size_mb * configured_ida_db_resident_factor()
         )
         worker_memory_mb = max(worker_memory_mb, estimated)
     return max(1, available_memory_mb // worker_memory_mb)
@@ -122,6 +124,28 @@ def configured_ida_worker_memory_mb() -> int:
     except ValueError:
         return DEFAULT_IDA_WORKER_MEMORY_MB
     return max(512, value)
+
+
+def configured_ida_worker_base_mb() -> int:
+    raw = os.environ.get(
+        "TOCODE_IDA_WORKER_BASE_MEMORY_MB", str(DEFAULT_IDA_WORKER_BASE_MEMORY_MB)
+    ).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_IDA_WORKER_BASE_MEMORY_MB
+    return max(0, value)
+
+
+def configured_ida_db_resident_factor() -> float:
+    raw = os.environ.get(
+        "TOCODE_IDA_DB_RESIDENT_FACTOR", str(DEFAULT_IDA_DB_RESIDENT_FACTOR)
+    ).strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_IDA_DB_RESIDENT_FACTOR
+    return max(0.0, value)
 
 
 def available_memory_mb() -> int | None:
