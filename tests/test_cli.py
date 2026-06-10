@@ -1,6 +1,12 @@
 import pytest
 
-from tocode.cli import build_parser, parse_jobs
+from tocode.cli import _format_duration, build_parser, parse_jobs
+
+
+def test_format_duration_uses_seconds_then_minutes() -> None:
+    assert _format_duration(4.27) == "4.3s"
+    assert _format_duration(75) == "1m 15s"
+    assert _format_duration(3600) == "60m 0s"
 
 
 def test_parse_jobs_accepts_auto_and_positive_ints() -> None:
