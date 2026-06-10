@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 from tocode.exporter import (
+    _counts_from_summary,
     _worker_spec,
     export_binary,
     fallback_prototype,
     render_one,
     tree_safe_function,
 )
+from tocode.metadata import functions_json
 from tocode.naming import NameBook
 from tocode.progress import Progress
 from tocode.schema import (
     BinaryFacts,
+    FunctionRange,
     ProgramAnalysis,
     Routine,
     Segment,
@@ -458,6 +462,168 @@ def test_default_output_uses_invoked_binary_path(tmp_path: Path) -> None:
     )
 
     assert summary.root_dir == (invoked_root / "sample_decompiler").resolve()
+
+
+def test_counts_from_summary_reads_args_and_locals() -> None:
+    summary = (
+        "signature: int f(int a, int b)\n"
+        "address: 0x1000\n"
+        "size: 32 bytes\n"
+        "args: 2\n"
+        "locals: 5\n"
+    )
+    assert _counts_from_summary(summary) == (2, 5)
+
+
+def test_counts_from_summary_missing_fields_returns_none() -> None:
+    assert _counts_from_summary("radare-style summary with no counts") == (None, None)
+
+
+def _single_routine_analysis() -> ProgramAnalysis:
+    binary = BinaryFacts(
+        path=Path("/bin/sample"),
+        arch="x86",
+        bits=64,
+        image_base=0,
+        os_name="linux",
+        format_name="elf",
+        file_type="elf",
+        entrypoints=[],
+    )
+    routine = Routine(
+        address=0x1000,
+        name="sub_1000",
+        size=32,
+        signature=None,
+        calltype=None,
+        noreturn=False,
+        stack_size=0,
+        locals_count=0,
+        args_count=0,
+        outdegree=0,
+        indegree=0,
+    )
+    return ProgramAnalysis(
+        binary=binary,
+        segments=[],
+        routines={0x1000: routine},
+        imports={},
+        exports=[],
+        symbols=[],
+        relocations=[],
+        strings=[],
+        flags=[],
+        callees={0x1000: []},
+        callers={0x1000: []},
+        import_calls={0x1000: []},
+        roots=[0x1000],
+        thunks=set(),
+    )
+
+
+def test_strings_json_xrefs_come_from_backend_data() -> None:
+    from tocode.metadata import strings_json
+
+    analysis = _single_routine_analysis()  # routine 0x1000 covers 0x1000..0x1020
+    analysis.strings.append(
+        StringEntry(0x4000, 0x4000, 5, 5, ".rodata", "ascii", "hello")
+    )
+    analysis.data_xrefs[0x4000] = [(0x1008, False), (0x1010, True)]
+
+    rows = cast(list[dict[str, Any]], strings_json(analysis)["strings"])
+
+    assert rows[0]["xrefs"] == [
+        {"function": "sub_1000", "address": "0x1000", "access": "read"},
+        {"function": "sub_1000", "address": "0x1000", "access": "write"},
+    ]
+
+
+def test_add_variable_xrefs_uses_backend_data() -> None:
+    from tocode.metadata import add_variable_xrefs
+
+    analysis = _single_routine_analysis()
+    analysis.data_xrefs[0x4000] = [(0x1004, False)]
+    variables: dict[str, dict[str, object]] = {"obj_4000": {"va": "0x4000"}}
+
+    add_variable_xrefs(variables, analysis)
+
+    assert variables["obj_4000"]["xrefs"] == [
+        {"function": "sub_1000", "address": "0x1000", "access": "read"}
+    ]
+
+
+def test_data_xref_to_address_outside_any_function_is_dropped() -> None:
+    from tocode.metadata import add_variable_xrefs
+
+    analysis = _single_routine_analysis()
+    analysis.data_xrefs[0x4000] = [(0x9999, False)]  # not inside any routine
+    variables: dict[str, dict[str, object]] = {"obj_4000": {"va": "0x4000"}}
+
+    add_variable_xrefs(variables, analysis)
+
+    assert variables["obj_4000"]["xrefs"] == []
+
+
+def test_sections_json_omits_entropy_unless_enabled() -> None:
+    from tocode.metadata import sections_json
+
+    analysis = _single_routine_analysis()
+    analysis.segments.append(
+        Segment(".text", 16, 16, "PROGBITS", "r-x", 0, 0x1000, entropy=5.0)
+    )
+
+    off = cast(list[dict[str, Any]], sections_json(analysis, entropy=False)["sections"])
+    on = cast(list[dict[str, Any]], sections_json(analysis, entropy=True)["sections"])
+
+    assert off[0]["entropy"] is None
+    assert on[0]["entropy"] == 5.0
+
+
+def test_functions_json_prefers_render_time_counts() -> None:
+    analysis = _single_routine_analysis()
+    ranges = [
+        FunctionRange(
+            address=0x1000,
+            name="sub_1000",
+            c_file=Path("a.c"),
+            c_line_start=1,
+            c_line_end=2,
+            asm_file=Path("a.asm"),
+            asm_line_start=1,
+            asm_line_end=2,
+            arg_count=3,
+            local_count=7,
+        )
+    ]
+    rows = cast(
+        list[dict[str, Any]], functions_json(analysis, ranges, {}, {})["functions"]
+    )
+    assert rows[0]["nargs"] == 3
+    assert rows[0]["nlocals"] == 7
+
+
+def test_functions_json_falls_back_to_inventory_counts() -> None:
+    analysis = _single_routine_analysis()
+    analysis.routines[0x1000].args_count = 4
+    analysis.routines[0x1000].locals_count = 1
+    # Range without recovered counts (e.g. radare2 backend summary).
+    ranges = [
+        FunctionRange(
+            address=0x1000,
+            name="sub_1000",
+            c_file=Path("a.c"),
+            c_line_start=1,
+            c_line_end=2,
+            asm_file=Path("a.asm"),
+            asm_line_start=1,
+            asm_line_end=2,
+        )
+    ]
+    rows = cast(
+        list[dict[str, Any]], functions_json(analysis, ranges, {}, {})["functions"]
+    )
+    assert rows[0]["nargs"] == 4
+    assert rows[0]["nlocals"] == 1
 
 
 def test_tree_safe_function_preserves_scanner_calls() -> None:

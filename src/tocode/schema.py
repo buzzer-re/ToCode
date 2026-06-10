@@ -135,6 +135,8 @@ class FunctionRange:
     asm_file: Path
     asm_line_start: int
     asm_line_end: int
+    arg_count: int | None = None
+    local_count: int | None = None
 
 
 @dataclass(slots=True)
@@ -186,6 +188,9 @@ class ProgramAnalysis:
     import_calls: dict[int, list[str]]
     roots: list[int]
     thunks: set[int]
+    # Data address -> list of (referencing instruction address, is_write), taken
+    # directly from the decompiler's cross-reference database during analysis.
+    data_xrefs: dict[int, list[tuple[int, bool]]] = field(default_factory=dict)
     _app_cache: list[Routine] | None = field(default=None, init=False, repr=False)
 
     def segment_at(self, address: int) -> Segment | None:

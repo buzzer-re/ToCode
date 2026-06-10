@@ -79,6 +79,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also write tree-sitter/Semgrep friendly source under src/tree.",
     )
     parser.add_argument(
+        "--entropy",
+        action="store_true",
+        help="Compute per-section Shannon entropy (off by default; slow on large binaries).",
+    )
+    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -130,4 +135,5 @@ def _run_one(
             progress=progress,
             jobs=args.jobs,
             tree=args.tree,
+            entropy=args.entropy,
         )
