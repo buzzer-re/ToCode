@@ -38,13 +38,20 @@ class Progress:
             print(message, file=sys.stderr)
 
     @contextmanager
-    def bar(self, *, total: int, desc: str, unit: str) -> Iterator[ProgressBar]:
+    def bar(
+        self, *, total: int, desc: str, unit: str, unit_scale: bool = False
+    ) -> Iterator[ProgressBar]:
         tqdm_factory: Any = _tqdm
         if not self.enabled or tqdm_factory is None:
             yield _NullProgress()
             return
         bar = tqdm_factory(
-            total=total, desc=desc, unit=unit, leave=False, dynamic_ncols=True
+            total=total,
+            desc=desc,
+            unit=unit,
+            unit_scale=unit_scale,
+            leave=False,
+            dynamic_ncols=True,
         )
         try:
             yield bar
