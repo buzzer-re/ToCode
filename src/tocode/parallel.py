@@ -11,6 +11,11 @@ MAX_AUTO_IDA_JOBS = 2
 FUNCTIONS_PER_WORKER = 32
 DEFAULT_JOB_LIMIT = 16
 DEFAULT_IDA_WORKER_MEMORY_MB = 3072
+# A worker loads the whole IDA database into memory. Estimate its resident cost
+# from the database size so that huge databases (kernels) do not over-subscribe
+# RAM. Base covers IDA runtime + Hex-Rays; the factor covers the loaded database.
+IDA_WORKER_BASE_MEMORY_MB = 768
+IDA_DB_RESIDENT_FACTOR = 1.5
 
 
 def choose_jobs(
@@ -23,29 +28,50 @@ def choose_jobs(
     job_limit: int | None = None,
     available_memory_mb: int | None = None,
     ida_worker_memory_mb: int | None = None,
+    database_size_mb: int | None = None,
 ) -> int:
     limit = job_limit if job_limit is not None else configured_job_limit()
+    is_ida = backend.lower() == "ida"
+    # Explicit `--jobs N` is honored as-is; the operator has opted into N workers.
     if requested is not None:
         return max(1, min(requested, function_count or 1, limit))
 
     if function_count < MIN_FUNCTIONS_FOR_AUTO or analysis_seconds is None:
         return 1
-    if backend.lower() != "ida" and analysis_seconds > FAST_ANALYSIS_SECONDS:
+    if not is_ida and analysis_seconds > FAST_ANALYSIS_SECONDS:
         return 1
 
     cpus = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
-    backend_limit = MAX_AUTO_IDA_JOBS if backend.lower() == "ida" else MAX_AUTO_JOBS
+    backend_limit = MAX_AUTO_IDA_JOBS if is_ida else MAX_AUTO_JOBS
     ceiling = min(cpus, backend_limit, limit, function_count)
-    if backend.lower() == "ida" and available_memory_mb is not None:
-        worker_memory_mb = (
-            ida_worker_memory_mb
-            if ida_worker_memory_mb is not None
-            else configured_ida_worker_memory_mb()
+    if is_ida:
+        memory_ceiling = _ida_memory_ceiling(
+            available_memory_mb, ida_worker_memory_mb, database_size_mb
         )
-        memory_ceiling = available_memory_mb // worker_memory_mb
-        ceiling = min(ceiling, max(1, memory_ceiling))
+        if memory_ceiling is not None:
+            ceiling = min(ceiling, memory_ceiling)
     target = math.ceil(function_count / FUNCTIONS_PER_WORKER)
     return max(1, min(ceiling, target))
+
+
+def _ida_memory_ceiling(
+    available_memory_mb: int | None,
+    ida_worker_memory_mb: int | None,
+    database_size_mb: int | None,
+) -> int | None:
+    if available_memory_mb is None:
+        return None
+    worker_memory_mb = (
+        ida_worker_memory_mb
+        if ida_worker_memory_mb is not None
+        else configured_ida_worker_memory_mb()
+    )
+    if database_size_mb is not None and database_size_mb > 0:
+        estimated = IDA_WORKER_BASE_MEMORY_MB + int(
+            database_size_mb * IDA_DB_RESIDENT_FACTOR
+        )
+        worker_memory_mb = max(worker_memory_mb, estimated)
+    return max(1, available_memory_mb // worker_memory_mb)
 
 
 def describe_jobs(

@@ -36,7 +36,6 @@ class BinaryAnalyzer:
         self.progress = progress or Progress()
         self.analysis: ProgramAnalysis | None = None
         self.analysis_seconds: float | None = None
-        self.progress.log(f"Loading {self.binary}")
 
     @property
     def backend_name(self) -> str:
@@ -413,6 +412,10 @@ def create_analyzer(
     )
     if progress is not None:
         progress.log(f"Using {choice.selected.upper()} as backend.")
+        # Log before constructing the session: opening (and, for a fresh binary,
+        # loading) the IDA database happens inside the session constructor and can
+        # take a while, so the user should see activity instead of a silent gap.
+        progress.log(f"Loading {Path(binary).resolve()}")
     if choice.selected == "ida":
         return BinaryAnalyzer(
             binary,

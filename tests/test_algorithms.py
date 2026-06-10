@@ -56,6 +56,43 @@ def test_choose_jobs_limits_auto_ida_parallelism_by_available_memory() -> None:
     )
 
 
+def test_choose_jobs_auto_ida_budget_scales_with_database_size() -> None:
+    # A large database (e.g. a kernel `.i64`) inflates the per-worker memory
+    # estimate so the auto budget falls back to a single worker even when the
+    # default flat estimate would have allowed more.
+    assert (
+        choose_jobs(
+            function_count=18000,
+            analysis_seconds=30.0,
+            requested=None,
+            backend="ida",
+            cpu_count=32,
+            job_limit=64,
+            available_memory_mb=6800,
+            ida_worker_memory_mb=3072,
+            database_size_mb=4000,
+        )
+        == 1
+    )
+
+
+def test_choose_jobs_auto_ida_budget_allows_parallel_for_small_database() -> None:
+    assert (
+        choose_jobs(
+            function_count=18000,
+            analysis_seconds=30.0,
+            requested=None,
+            backend="ida",
+            cpu_count=32,
+            job_limit=64,
+            available_memory_mb=64000,
+            ida_worker_memory_mb=3072,
+            database_size_mb=200,
+        )
+        == 2
+    )
+
+
 def test_requested_jobs_are_not_limited_by_available_memory() -> None:
     assert (
         choose_jobs(

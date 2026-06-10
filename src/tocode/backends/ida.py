@@ -557,7 +557,7 @@ class IdaSession:
                     imported.add(name)
         return sorted(edges), sorted(name for name in imported if name)
 
-    def _resolve_thunk(self, func):
+    def _resolve_thunk(self, func: Any) -> Any:
         from ida_domain.functions import FunctionFlags
 
         current = func

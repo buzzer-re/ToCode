@@ -14,7 +14,9 @@ import tempfile
 from typing import Any
 
 from .analysis import BinaryAnalyzer
+from .backends.base import is_ida_database
 from .backends.ida import IdaSession
+from .backends.ida import _cache_root as _ida_cache_root
 from .backends.r2 import R2Session
 from .cluster import cluster_routines
 from .metadata import (
@@ -125,6 +127,7 @@ class WorkerSpec:
     idadir: Path | None = None
     ida_domain_path: Path | None = None
     db_path: Path | None = None
+    copy_db: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,13 +232,15 @@ def _select_render_workers(context: ExportContext) -> None:
     count = len(context.addresses)
     if context.analyzer.supports_parallel:
         context.requested_jobs = context.jobs
+        is_ida = context.analyzer.backend_name == "ida"
         context.worker_count = choose_jobs(
             function_count=count,
             analysis_seconds=context.analyzer.analysis_seconds,
             requested=context.jobs,
             backend=context.analyzer.backend_name,
-            available_memory_mb=available_memory_mb()
-            if context.analyzer.backend_name == "ida"
+            available_memory_mb=available_memory_mb() if is_ida else None,
+            database_size_mb=_worker_database_size_mb(context.analyzer)
+            if is_ida
             else None,
         )
         context.render_mode = "process" if context.worker_count > 1 else "single"
@@ -527,7 +532,7 @@ def render_and_write_source_tree_parallel(
         progress.log(f"Opening {worker_count} streaming workers for {total} functions")
         progress.log("Preparing IDA worker database copies")
     analyzer.prepare_parallel_workers()
-    spec = _worker_spec(analyzer)
+    spec = _worker_spec(analyzer, copy_db=worker_count > 1)
     if progress is not None:
         progress.log("Closing parent backend session before workers open")
     analyzer.release_parallel_resources()
@@ -560,16 +565,7 @@ def render_and_write_source_tree_parallel(
                 worker_count=worker_count,
                 progress=progress,
             )
-            cluster_total = len(clusters)
-            for cluster_index, cluster in enumerate(clusters, start=1):
-                if progress is not None:
-                    progress.log(
-                        _cluster_progress_message(
-                            cluster_index=cluster_index,
-                            cluster_total=cluster_total,
-                            cluster=cluster,
-                        )
-                    )
+            for cluster in clusters:
                 rendered: dict[int, RenderedFunction] = {}
                 futures = {
                     executor.submit(_render_in_worker, address): address
@@ -627,15 +623,6 @@ def _wait_for_streaming_workers(
     if progress is not None:
         pid_text = ", ".join(str(pid) for pid in sorted(pids))
         progress.log(f"Streaming workers ready: {pid_text}")
-
-
-def _cluster_progress_message(
-    *, cluster_index: int, cluster_total: int, cluster: Cluster
-) -> str:
-    return (
-        f"Rendering cluster {cluster_index}/{cluster_total}: "
-        f"{cluster.label} ({len(cluster.members)} functions)"
-    )
 
 
 def _write_rendered_cluster(
@@ -1024,7 +1011,7 @@ def _render_parallel(
 ) -> dict[int, RenderedFunction]:
     progress.log(f"Opening {worker_count} workers for {len(addresses)} functions")
     analyzer.prepare_parallel_workers()
-    spec = _worker_spec(analyzer)
+    spec = _worker_spec(analyzer, copy_db=worker_count > 1)
     analyzer.release_parallel_resources()
     output: dict[int, RenderedFunction] = {}
     pending = set(addresses)
@@ -1057,7 +1044,7 @@ def _render_parallel(
     return output
 
 
-def _worker_spec(analyzer: BinaryAnalyzer) -> WorkerSpec:
+def _worker_spec(analyzer: BinaryAnalyzer, *, copy_db: bool = True) -> WorkerSpec:
     session = analyzer.session
     return WorkerSpec(
         backend=analyzer.backend_name,
@@ -1066,7 +1053,29 @@ def _worker_spec(analyzer: BinaryAnalyzer) -> WorkerSpec:
         idadir=getattr(session, "idadir", None),
         ida_domain_path=getattr(session, "ida_domain_path", None),
         db_path=_session_database_path(session),
+        copy_db=copy_db,
     )
+
+
+def _worker_database_size_mb(analyzer: BinaryAnalyzer) -> int | None:
+    """On-disk size (MiB) of the database each worker will load, if known.
+
+    Used to size the per-worker memory budget so that a very large database
+    (such as a kernel `.i64`) does not spawn more workers than RAM can hold.
+    """
+    session = analyzer.session
+    candidate = getattr(session, "_cache_db", None)
+    if candidate is None:
+        binary = getattr(session, "binary", None)
+        if binary is not None and is_ida_database(Path(binary)):
+            candidate = binary
+    if candidate is None:
+        return None
+    try:
+        size = Path(candidate).stat().st_size
+    except OSError:
+        return None
+    return max(1, size // (1024 * 1024))
 
 
 def _session_database_path(session: object) -> Path | None:
@@ -1087,16 +1096,23 @@ def _init_worker(spec: WorkerSpec, analysis: ProgramAnalysis, names: NameBook) -
 def _open_worker(spec: WorkerSpec):
     session: Any
     if spec.backend == "ida":
-        worker_db = (
-            _copy_worker_database(spec.db_path) if spec.db_path is not None else None
-        )
+        # When a single worker renders, it can open the prepared database in place
+        # instead of duplicating it. Copying a large database (e.g. a kernel `.i64`)
+        # is only needed so that concurrent workers do not share one IDA lock, and a
+        # copy on RAM-backed temp storage would otherwise exhaust memory.
+        if spec.db_path is not None and spec.copy_db:
+            worker_db = _copy_worker_database(spec.db_path)
+            open_db: Path | None = worker_db
+        else:
+            worker_db = None
+            open_db = spec.db_path
         try:
             session = IdaSession(
                 spec.binary,
                 idadir=spec.idadir,
                 ida_domain_path=spec.ida_domain_path,
-                db_path=worker_db,
-                needs_analysis=False if worker_db is not None else None,
+                db_path=open_db,
+                needs_analysis=False if open_db is not None else None,
             )
         except Exception:
             if worker_db is not None:
@@ -1116,11 +1132,33 @@ def _open_worker(spec: WorkerSpec):
 
 
 def _copy_worker_database(db_path: Path) -> Path:
-    fd, name = tempfile.mkstemp(prefix="tocode-ida-worker-", suffix=db_path.suffix)
+    # Place worker copies on durable, on-disk storage rather than the default
+    # system temp dir, which is frequently RAM-backed (tmpfs). Copying a
+    # multi-gigabyte IDA database into tmpfs would pin that memory and OOM-kill
+    # the export. The on-disk page cache used here is reclaimable under pressure.
+    copy_dir = _worker_copy_dir(db_path)
+    fd, name = tempfile.mkstemp(
+        prefix="tocode-ida-worker-", suffix=db_path.suffix, dir=str(copy_dir)
+    )
     os.close(fd)
     target = Path(name)
     shutil.copy2(db_path, target)
     return target
+
+
+def _worker_copy_dir(db_path: Path) -> Path:
+    explicit = os.environ.get("TOCODE_WORKER_TMP_DIR", "").strip()
+    if explicit:
+        candidate = Path(explicit).expanduser()
+    else:
+        candidate = _ida_cache_root() / "workers"
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+        return candidate
+    except OSError:
+        # Fall back to the directory that already holds the source database; it is
+        # on the same (on-disk) filesystem as the data we are copying.
+        return db_path.parent
 
 
 def _close_worker() -> None:
@@ -1390,18 +1428,8 @@ def _write_metadata(context: ExportContext) -> None:
     root = _need(context.root)
     header = _need(context.header_path)
     names = _need(context.names)
-    header.write_text(
-        build_header(analysis, context.prototypes, names), encoding="utf-8"
-    )
-    context.data_variable_count = export_variables(analysis, root, context.raw_ranges)
-    context.function_index = write_function_index(root, context.raw_ranges)
-    context.tree_index = (
-        write_function_index(
-            root, context.tree_ranges, file_name="function-index-tree.json"
-        )
-        if context.tree_enabled
-        else None
-    )
+
+    # Cheap cleanups of stale artifacts; not worth a progress step.
     if not context.tree_enabled:
         stale_tree_index = root / "function-index-tree.json"
         if stale_tree_index.exists():
@@ -1412,41 +1440,128 @@ def _write_metadata(context: ExportContext) -> None:
     stale = root / ("function-index-" + "ll" + "m.json")
     if stale.exists():
         stale.unlink()
-    write_json(root / "sections.json", sections_json(analysis))
-    write_json(root / "strings.json", strings_json(analysis, context.raw_ranges))
-    write_json(root / "imports.json", imports_json(analysis))
-    write_json(root / "exports.json", exports_json(analysis))
-    write_json(root / "relocations.json", relocations_json(analysis))
-    write_json(
-        root / "functions.json",
-        functions_json(
-            analysis,
-            context.raw_ranges,
-            context.prototypes,
-            names.functions,
-            tree_ranges=context.tree_ranges,
+
+    shared: dict[str, Any] = {}
+
+    def write_header() -> None:
+        header.write_text(
+            build_header(analysis, context.prototypes, names), encoding="utf-8"
+        )
+
+    def write_variables() -> None:
+        context.data_variable_count = export_variables(
+            analysis, root, context.raw_ranges
+        )
+
+    def write_indexes() -> None:
+        context.function_index = write_function_index(root, context.raw_ranges)
+        context.tree_index = (
+            write_function_index(
+                root, context.tree_ranges, file_name="function-index-tree.json"
+            )
+            if context.tree_enabled
+            else None
+        )
+
+    def write_functions() -> None:
+        write_json(
+            root / "functions.json",
+            functions_json(
+                analysis,
+                context.raw_ranges,
+                context.prototypes,
+                names.functions,
+                tree_ranges=context.tree_ranges,
+            ),
+        )
+
+    def write_reachable() -> None:
+        reachable = reachable_json(analysis)
+        shared["reachable"] = reachable
+        write_json(root / "reachable.json", reachable)
+
+    def write_triage() -> None:
+        write_json(
+            root / "triage.json",
+            triage_json(
+                analysis, context.clusters, context.raw_ranges, shared["reachable"]
+            ),
+        )
+
+    def publish_database() -> None:
+        context.ida_database = publish_backend_database(context)
+
+    def write_docs() -> None:
+        (root / "AGENTS.md").write_text(
+            build_export_agents(
+                analysis, context.header_name, tree_enabled=context.tree_enabled
+            ),
+            encoding="utf-8",
+        )
+        (root / "CLAUDE.md").write_text("@./AGENTS.md\n", encoding="utf-8")
+
+    steps: list[tuple[str, Any]] = [
+        ("header", write_header),
+        ("data variables", write_variables),
+        ("function index", write_indexes),
+        (
+            "sections.json",
+            lambda: write_json(root / "sections.json", sections_json(analysis)),
         ),
-    )
-    reachable = reachable_json(analysis)
-    write_json(root / "reachable.json", reachable)
-    write_json(
-        root / "cluster-graph.json",
-        cluster_graph_json(analysis, context.clusters, context.raw_ranges),
-    )
-    write_json(
-        root / "triage.json",
-        triage_json(analysis, context.clusters, context.raw_ranges, reachable),
-    )
-    context.ida_database = publish_backend_database(context)
-    write_project_json(context)
-    (root / "AGENTS.md").write_text(
-        build_export_agents(
-            analysis, context.header_name, tree_enabled=context.tree_enabled
+        (
+            "strings.json",
+            lambda: write_json(
+                root / "strings.json", strings_json(analysis, context.raw_ranges)
+            ),
         ),
-        encoding="utf-8",
-    )
-    (root / "CLAUDE.md").write_text("@./AGENTS.md\n", encoding="utf-8")
+        (
+            "imports.json",
+            lambda: write_json(root / "imports.json", imports_json(analysis)),
+        ),
+        (
+            "exports.json",
+            lambda: write_json(root / "exports.json", exports_json(analysis)),
+        ),
+        (
+            "relocations.json",
+            lambda: write_json(root / "relocations.json", relocations_json(analysis)),
+        ),
+        ("functions.json", write_functions),
+        ("reachable.json", write_reachable),
+        (
+            "cluster-graph.json",
+            lambda: write_json(
+                root / "cluster-graph.json",
+                cluster_graph_json(analysis, context.clusters, context.raw_ranges),
+            ),
+        ),
+        ("triage.json", write_triage),
+        ("backend database", publish_database),
+        ("project.json", lambda: write_project_json(context)),
+        ("AGENTS.md", write_docs),
+        ("export-manifest.json", lambda: _set_manifest(context)),
+    ]
+
+    context.progress.log(f"Writing metadata and indexes ({len(steps)} steps)")
+    with context.progress.bar(total=len(steps), desc="metadata", unit="step") as bar:
+        for label, run in steps:
+            _set_bar_description(bar, f"metadata: {label}")
+            run()
+            bar.update(1)
+
+
+def _set_manifest(context: ExportContext) -> None:
     context.manifest = write_manifest(context)
+
+
+def _set_bar_description(bar: Any, text: str) -> None:
+    setter = getattr(bar, "set_description", None)
+    if not callable(setter):
+        return
+    try:
+        setter(text, refresh=False)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def publish_backend_database(context: ExportContext) -> Path | None:
@@ -1462,9 +1577,35 @@ def publish_backend_database(context: ExportContext) -> Path | None:
     suffix = source.suffix.lower()
     target = root / f"{clean_path_component(analysis.binary.path.stem)}{suffix}"
     if source.resolve() != target.resolve():
-        shutil.copy2(source, target)
+        _copy_file_with_progress(
+            source, target, context.progress, desc="saving database"
+        )
     context.progress.log(f"Saved IDA database to {target}")
     return target.resolve()
+
+
+def _copy_file_with_progress(
+    source: Path, target: Path, progress: Progress, *, desc: str
+) -> None:
+    # A database (kernel `.i64`) can be multiple gigabytes; copy in chunks with a
+    # byte progress bar so the export does not appear stuck during the copy.
+    try:
+        size = source.stat().st_size
+    except OSError:
+        size = 0
+    chunk_size = 8 * 1024 * 1024
+    with (
+        progress.bar(total=size, desc=desc, unit="B", unit_scale=True) as bar,
+        source.open("rb") as src,
+        target.open("wb") as dst,
+    ):
+        while True:
+            buffer = src.read(chunk_size)
+            if not buffer:
+                break
+            dst.write(buffer)
+            bar.update(len(buffer))
+    shutil.copystat(source, target)
 
 
 def build_header(
