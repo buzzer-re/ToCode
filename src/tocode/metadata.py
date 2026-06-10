@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from collections import deque
+from bisect import bisect_right
+from collections import Counter, deque
 import math
 from pathlib import Path
 import re
-from typing import Any
+from typing import Callable
 
 from .naming import SHARED_CLUSTER_ID, c_file_name, clean_path_component
-from .schema import Cluster, FunctionRange, ProgramAnalysis, Segment, StringEntry
+from .schema import Cluster, FunctionRange, ProgramAnalysis, Routine, Segment
 
 
 def display_path(path: Path) -> str:
@@ -59,7 +60,9 @@ def exports_json(analysis: ProgramAnalysis) -> dict[str, object]:
     }
 
 
-def sections_json(analysis: ProgramAnalysis) -> dict[str, object]:
+def sections_json(
+    analysis: ProgramAnalysis, *, entropy: bool = True
+) -> dict[str, object]:
     return {
         "sections": [
             {
@@ -71,7 +74,7 @@ def sections_json(analysis: ProgramAnalysis) -> dict[str, object]:
                 "type": item.kind,
                 "permissions": item.perms,
                 "rwx": item.readable and item.writable and item.executable,
-                "entropy": section_entropy(analysis, item),
+                "entropy": section_entropy(analysis, item, enabled=entropy),
             }
             for item in analysis.segments
         ]
@@ -93,10 +96,8 @@ def relocations_json(analysis: ProgramAnalysis) -> dict[str, object]:
     }
 
 
-def strings_json(
-    analysis: ProgramAnalysis, ranges: list[FunctionRange]
-) -> dict[str, object]:
-    xrefs = string_xrefs(analysis.strings, ranges)
+def strings_json(analysis: ProgramAnalysis) -> dict[str, object]:
+    locate = _function_locator(analysis)
     return {
         "strings": [
             {
@@ -107,7 +108,7 @@ def strings_json(
                 "section": item.segment,
                 "type": item.kind,
                 "value": item.value,
-                "xrefs": xrefs.get(item.vaddr, []),
+                "xrefs": _data_xref_rows(analysis, item.vaddr, locate),
             }
             for item in analysis.strings
         ]
@@ -139,8 +140,12 @@ def functions_json(
                 "c_name": c_names.get(address, routine.name),
                 "prototype": prototypes.get(address),
                 "size": routine.size,
-                "nargs": routine.args_count,
-                "nlocals": routine.locals_count,
+                "nargs": raw_range.arg_count
+                if raw_range is not None and raw_range.arg_count is not None
+                else routine.args_count,
+                "nlocals": raw_range.local_count
+                if raw_range is not None and raw_range.local_count is not None
+                else routine.locals_count,
                 "stackframe": routine.stack_size,
                 "callees": [f"0x{item:x}" for item in callees],
                 "callee_names": [
@@ -251,6 +256,8 @@ def triage_json(
     clusters: list[Cluster],
     ranges: list[FunctionRange],
     reachable_doc: dict[str, object],
+    *,
+    entropy: bool = True,
 ) -> dict[str, object]:
     reachable_rows = reachable_doc.get("reachable", [])
     return {
@@ -258,10 +265,10 @@ def triage_json(
         "arch": analysis.binary.arch,
         "bits": analysis.binary.bits,
         "compiler": guess_compiler(analysis),
-        "packed": guess_packed(analysis),
+        "packed": guess_packed(analysis, entropy=entropy),
         "entry_clusters": entry_clusters(analysis, clusters, ranges),
-        "sections": triage_sections(analysis),
-        "rwx_sections": triage_sections(analysis, rwx_only=True),
+        "sections": triage_sections(analysis, entropy=entropy),
+        "rwx_sections": triage_sections(analysis, rwx_only=True, entropy=entropy),
         "export_count": len(analysis.exports),
         "import_count": len(analysis.imports),
         "strings_of_interest": interesting_strings(analysis)[:50],
@@ -305,7 +312,10 @@ def entry_clusters(
 
 
 def export_variables(
-    analysis: ProgramAnalysis, root: Path, ranges: list[FunctionRange]
+    analysis: ProgramAnalysis,
+    root: Path,
+    *,
+    entropy: bool = True,
 ) -> int:
     data_dir = root / "data"
     sections: list[dict[str, object]] = []
@@ -319,7 +329,7 @@ def export_variables(
                 handle.seek(segment.paddr)
                 blob = handle.read(segment.size)
                 (data_dir / file_name).write_bytes(blob)
-                if blob:
+                if blob and entropy:
                     segment.entropy = round(shannon_entropy(blob), 6)
             sections.append(
                 {
@@ -329,10 +339,10 @@ def export_variables(
                     "size": segment.vsize,
                     "file_size": segment.size,
                     "permissions": segment.perms,
-                    "entropy": section_entropy(analysis, segment),
+                    "entropy": section_entropy(analysis, segment, enabled=entropy),
                 }
             )
-    variables = variables_document(analysis, ranges)
+    variables = variables_document(analysis)
     write_json(
         data_dir / "variables.json", {"sections": sections, "variables": variables}
     )
@@ -344,7 +354,7 @@ def export_variables(
 
 
 def variables_document(
-    analysis: ProgramAnalysis, ranges: list[FunctionRange]
+    analysis: ProgramAnalysis,
 ) -> dict[str, dict[str, object]]:
     variables: dict[str, dict[str, object]] = {}
     seen: set[int] = set()
@@ -446,106 +456,80 @@ def variables_document(
         }
         seen.add(flag.offset)
 
-    add_variable_xrefs(variables, ranges)
+    add_variable_xrefs(variables, analysis)
     return dict(sorted(variables.items()))
 
 
-def source_lines(ranges: list[FunctionRange]) -> list[dict[str, Any]]:
-    cache: dict[Path, list[str]] = {}
-    rows: list[dict[str, Any]] = []
-    for item in ranges:
-        if item.c_file not in cache:
-            try:
-                cache[item.c_file] = item.c_file.read_text(
-                    encoding="utf-8", errors="replace"
-                ).splitlines()
-            except OSError:
-                cache[item.c_file] = []
-        for line_number in range(item.c_line_start, item.c_line_end + 1):
-            index = line_number - 1
-            if 0 <= index < len(cache[item.c_file]):
-                rows.append(
-                    {
-                        "address": item.address,
-                        "function": item.name,
-                        "path": str(item.c_file),
-                        "line": line_number,
-                        "text": cache[item.c_file][index],
-                    }
-                )
+def _function_locator(
+    analysis: ProgramAnalysis,
+) -> Callable[[int], Routine | None]:
+    """Build a fast "which function contains this address" lookup."""
+    items = sorted(
+        (routine.address, routine.address + max(routine.size, 1), routine)
+        for routine in analysis.routines.values()
+    )
+    starts = [item[0] for item in items]
+
+    def locate(address: int) -> Routine | None:
+        index = bisect_right(starts, address) - 1
+        if 0 <= index < len(items):
+            start, end, routine = items[index]
+            if start <= address < end:
+                return routine
+        return None
+
+    return locate
+
+
+def _data_xref_rows(
+    analysis: ProgramAnalysis,
+    address: int,
+    locate: Callable[[int], Routine | None],
+) -> list[dict[str, object]]:
+    """Cross-references to a data address, taken from the decompiler's xref data.
+
+    Resolves each referencing instruction to its containing function and reports
+    read/write access, deduplicated per (function, access).
+    """
+    rows: list[dict[str, object]] = []
+    seen: set[tuple[int, bool]] = set()
+    for ref_ea, is_write in analysis.data_xrefs.get(address, ()):
+        routine = locate(ref_ea)
+        if routine is None:
+            continue
+        key = (routine.address, is_write)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "function": routine.name,
+                "address": f"0x{routine.address:x}",
+                "access": "write" if is_write else "read",
+            }
+        )
+    rows.sort(key=lambda row: (str(row["address"]), str(row["access"])))
     return rows
 
 
-def string_xrefs(
-    strings: list[StringEntry], ranges: list[FunctionRange]
-) -> dict[int, list[dict[str, object]]]:
-    lines = source_lines(ranges)
-    result: dict[int, list[dict[str, object]]] = {}
-    for item in strings:
-        needles = string_needles(item.value)
-        found: list[dict[str, object]] = []
-        seen: set[tuple[int, int, str]] = set()
-        for line in lines:
-            if not any(needle in str(line["text"]) for needle in needles):
-                continue
-            key = (int(line["address"]), int(line["line"]), str(line["path"]))
-            if key in seen:
-                continue
-            seen.add(key)
-            found.append(
-                {
-                    "function": line["function"],
-                    "address": f"0x{int(line['address']):x}",
-                    "cluster": display_path(Path(str(line["path"]))),
-                    "line": line["line"],
-                }
-            )
-        result[item.vaddr] = found
-    return result
-
-
 def add_variable_xrefs(
-    variables: dict[str, dict[str, object]], ranges: list[FunctionRange]
+    variables: dict[str, dict[str, object]], analysis: ProgramAnalysis
 ) -> None:
-    lines = source_lines(ranges)
-    for name, variable in variables.items():
-        needles = {name}
-        value = variable.get("value")
-        if isinstance(value, str) and len(value) >= 4:
-            needles.update(string_needles(value))
-        flag = variable.get("flag")
-        if isinstance(flag, str):
-            needles.add(flag)
-        xrefs: list[dict[str, object]] = []
-        seen: set[tuple[int, bool]] = set()
-        for line in lines:
-            text = str(line["text"])
-            if not any(needle and needle in text for needle in needles):
-                continue
-            key = (int(line["address"]), looks_written(text))
-            if key in seen:
-                continue
-            seen.add(key)
-            xrefs.append(
-                {
-                    "function": line["function"],
-                    "address": f"0x{int(line['address']):x}",
-                    "access": "write" if key[1] else "read",
-                }
-            )
-        variable["xrefs"] = xrefs
+    locate = _function_locator(analysis)
+    for variable in variables.values():
+        address = _parse_hex(variable.get("va"))
+        variable["xrefs"] = (
+            _data_xref_rows(analysis, address, locate) if address is not None else []
+        )
 
 
-def string_needles(value: str) -> list[str]:
-    text = value.strip()
-    if len(text) < 4:
-        return []
-    escaped = text.encode("unicode_escape").decode("ascii")
-    return [
-        item
-        for item in {text, escaped, escaped.replace("\\\\", "\\")}
-        if len(item) >= 4
-    ]
+def _parse_hex(value: object) -> int | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return int(value, 16)
+    except ValueError:
+        return None
 
 
 def interesting_variables(
@@ -635,7 +619,7 @@ def looks_forwarded(value: str) -> bool:
 
 
 def triage_sections(
-    analysis: ProgramAnalysis, *, rwx_only: bool = False
+    analysis: ProgramAnalysis, *, rwx_only: bool = False, entropy: bool = True
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for item in analysis.segments:
@@ -645,7 +629,7 @@ def triage_sections(
         rows.append(
             {
                 "name": item.name,
-                "entropy": section_entropy(analysis, item),
+                "entropy": section_entropy(analysis, item, enabled=entropy),
                 "perms": item.perms,
                 "size": item.size,
                 "rwx": rwx,
@@ -685,23 +669,25 @@ def guess_compiler(analysis: ProgramAnalysis) -> str | None:
     return None
 
 
-def guess_packed(analysis: ProgramAnalysis) -> bool:
+def guess_packed(analysis: ProgramAnalysis, *, entropy: bool = True) -> bool:
+    if not entropy:
+        return False
     executable = [segment for segment in analysis.segments if segment.executable]
     return bool(
         [
             segment
             for segment in executable
-            if (section_entropy(analysis, segment) or 0.0) >= 7.2
+            if (section_entropy(analysis, segment, enabled=entropy) or 0.0) >= 7.2
         ]
         and len(analysis.imports) <= 5
     )
 
 
-def looks_written(line: str) -> bool:
-    return bool(re.search(r"(?<![=!<>])=(?!=)", line) or "++" in line or "--" in line)
-
-
-def section_entropy(analysis: ProgramAnalysis, segment: Segment) -> float | None:
+def section_entropy(
+    analysis: ProgramAnalysis, segment: Segment, *, enabled: bool = True
+) -> float | None:
+    if not enabled:
+        return None
     if segment.entropy is not None:
         return segment.entropy
     if segment.size <= 0:
@@ -721,9 +707,9 @@ def section_entropy(analysis: ProgramAnalysis, segment: Segment) -> float | None
 def shannon_entropy(data: bytes) -> float:
     if not data:
         return 0.0
-    counts: dict[int, int] = {}
-    for byte in data:
-        counts[byte] = counts.get(byte, 0) + 1
+    # Counter counts at C speed, far faster than a per-byte Python loop on the
+    # large segments found in kernels and other big binaries.
+    counts = Counter(data)
     total = len(data)
     return -sum((count / total) * math.log2(count / total) for count in counts.values())
 

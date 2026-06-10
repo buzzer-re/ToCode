@@ -27,3 +27,10 @@ def test_parser_accepts_short_quiet_flag() -> None:
     args = build_parser().parse_args(["-q", "sample.bin"])
 
     assert args.quiet is True
+
+
+def test_parser_uses_entropy_as_opt_in_flag() -> None:
+    parser = build_parser()
+
+    assert parser.parse_args(["sample.bin"]).entropy is False
+    assert parser.parse_args(["--entropy", "sample.bin"]).entropy is True

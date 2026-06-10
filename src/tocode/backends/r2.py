@@ -139,6 +139,24 @@ class R2Session:
             self._pdfj[address] = self.cmdj(f"pdfj @ 0x{address:x}") or {}
         return self._pdfj[address]
 
+    def data_xrefs(self, addresses) -> dict[int, list[tuple[int, bool]]]:
+        result: dict[int, list[tuple[int, bool]]] = {}
+        for address in addresses:
+            target = int(address)
+            rows = self.cmdj(f"axtj @ 0x{target:x}") or []
+            refs: list[tuple[int, bool]] = []
+            for row in rows:
+                frm = row.get("from")
+                if frm is None:
+                    continue
+                kind = str(row.get("type", "")).lower()
+                perm = str(row.get("perm", "")).lower()
+                is_write = "w" in perm or kind == "write"
+                refs.append((int(frm), is_write))
+            if refs:
+                result[target] = refs
+        return result
+
     def calls_from(
         self, address: int, imports, functions
     ) -> tuple[list[int], list[str]]:

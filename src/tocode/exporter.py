@@ -89,6 +89,7 @@ class ExportContext:
     out_dir: Path | None
     jobs: int | None
     tree_enabled: bool
+    entropy_enabled: bool = False
     analysis: ProgramAnalysis | None = None
     root: Path | None = None
     raw_dir: Path | None = None
@@ -146,6 +147,7 @@ def export_binary(
     progress: Progress | None = None,
     jobs: int | None = None,
     tree: bool = False,
+    entropy: bool = False,
 ) -> ExportSummary:
     progress = progress or analyzer.progress
     context = ExportContext(
@@ -154,6 +156,7 @@ def export_binary(
         out_dir=out_dir,
         jobs=jobs,
         tree_enabled=tree,
+        entropy_enabled=entropy,
     )
     _prepare_tree(context)
     _cluster(context)
@@ -244,6 +247,13 @@ def _select_render_workers(context: ExportContext) -> None:
             else None,
         )
         context.render_mode = "process" if context.worker_count > 1 else "single"
+        if is_ida and context.jobs is not None and context.worker_count < context.jobs:
+            context.progress.log(
+                f"Note: limiting to {context.worker_count} worker(s) instead of the "
+                f"requested {context.jobs} to fit available memory "
+                f"(each IDA worker loads the whole database; override with "
+                f"TOCODE_IDA_WORKER_MEMORY_MB)."
+            )
         context.progress.log(
             describe_jobs(
                 function_count=count,
@@ -871,6 +881,8 @@ def build_tree_cluster_file(
                 else raw_resolved.with_suffix(".asm"),
                 asm_line_start=raw_range.asm_line_start if raw_range is not None else 1,
                 asm_line_end=raw_range.asm_line_end if raw_range is not None else 1,
+                arg_count=raw_range.arg_count if raw_range is not None else None,
+                local_count=raw_range.local_count if raw_range is not None else None,
             )
         )
         c_line = end + 2
@@ -937,6 +949,7 @@ def build_cluster_files(
             _summary_function(routine, summary_path, item.summary_text).rstrip()
             + "\n\n"
         )
+        arg_count, local_count = _counts_from_summary(item.summary_text)
         ranges.append(
             FunctionRange(
                 address=address,
@@ -947,6 +960,8 @@ def build_cluster_files(
                 asm_file=asm_resolved,
                 asm_line_start=asm_start,
                 asm_line_end=asm_end,
+                arg_count=arg_count,
+                local_count=local_count,
             )
         )
         c_line = c_end + 2
@@ -959,6 +974,35 @@ def build_cluster_files(
         "ranges": ranges,
         "failures": failures,
     }
+
+
+def _counts_from_summary(summary_text: str) -> tuple[int | None, int | None]:
+    """Recover the argument and local counts the backend reported in a summary.
+
+    The decompiler computes these while rendering, so reading them back from the
+    summary avoids re-deriving them (which, for IDA, would mean decompiling every
+    function a second time during inventory). Returns ``(None, None)`` when the
+    summary does not carry the fields, so callers can fall back to inventory data.
+    """
+    args: int | None = None
+    locals_: int | None = None
+    for line in summary_text.splitlines():
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        label = key.strip()
+        if label == "args":
+            args = _safe_int(value)
+        elif label == "locals":
+            locals_ = _safe_int(value)
+    return args, locals_
+
+
+def _safe_int(value: str) -> int | None:
+    try:
+        return int(value.strip())
+    except (TypeError, ValueError):
+        return None
 
 
 def render_functions(
@@ -1450,7 +1494,7 @@ def _write_metadata(context: ExportContext) -> None:
 
     def write_variables() -> None:
         context.data_variable_count = export_variables(
-            analysis, root, context.raw_ranges
+            analysis, root, entropy=context.entropy_enabled
         )
 
     def write_indexes() -> None:
@@ -1484,7 +1528,11 @@ def _write_metadata(context: ExportContext) -> None:
         write_json(
             root / "triage.json",
             triage_json(
-                analysis, context.clusters, context.raw_ranges, shared["reachable"]
+                analysis,
+                context.clusters,
+                context.raw_ranges,
+                shared["reachable"],
+                entropy=context.entropy_enabled,
             ),
         )
 
@@ -1506,13 +1554,14 @@ def _write_metadata(context: ExportContext) -> None:
         ("function index", write_indexes),
         (
             "sections.json",
-            lambda: write_json(root / "sections.json", sections_json(analysis)),
+            lambda: write_json(
+                root / "sections.json",
+                sections_json(analysis, entropy=context.entropy_enabled),
+            ),
         ),
         (
             "strings.json",
-            lambda: write_json(
-                root / "strings.json", strings_json(analysis, context.raw_ranges)
-            ),
+            lambda: write_json(root / "strings.json", strings_json(analysis)),
         ),
         (
             "imports.json",
