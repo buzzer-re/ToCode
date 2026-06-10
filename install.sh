@@ -2,9 +2,17 @@
 set -euo pipefail
 
 repo_url="${TOCODE_REPO_URL:-https://github.com/buzzer-re/ToCode.git}"
-install_dir="${TOCODE_INSTALL_DIR:-$HOME/ToCode}"
 branch="${TOCODE_BRANCH:-main}"
 with_dev=false
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+if [ -n "${TOCODE_INSTALL_DIR:-}" ]; then
+  install_dir="$TOCODE_INSTALL_DIR"
+elif [ -d "$script_dir/.git" ] && [ -f "$script_dir/pyproject.toml" ]; then
+  install_dir="$script_dir"
+else
+  install_dir="$HOME/ToCode"
+fi
 
 usage() {
   cat <<'EOF'
@@ -14,7 +22,7 @@ Usage:
   ./install.sh [options]
 
 Options:
-  --dir PATH       Clone or update ToCode at PATH. Default: $HOME/ToCode
+  --dir PATH       Clone or update ToCode at PATH. Default: this checkout when run from one, otherwise $HOME/ToCode
   --repo URL       Git repository URL. Default: https://github.com/buzzer-re/ToCode.git
   --branch NAME    Branch to install. Default: main
   --dev            Also install development extras in the local checkout
@@ -124,10 +132,14 @@ done
 command -v git >/dev/null 2>&1 || die "git is required but was not found on PATH"
 
 if [ -d "$install_dir/.git" ]; then
-  info "Updating ToCode at $install_dir"
-  git -C "$install_dir" fetch origin "$branch"
-  git -C "$install_dir" checkout "$branch"
-  git -C "$install_dir" pull --ff-only origin "$branch"
+  if [ "$install_dir" = "$script_dir" ]; then
+    info "Installing ToCode from this checkout at $install_dir"
+  else
+    info "Updating ToCode at $install_dir"
+    git -C "$install_dir" fetch origin "$branch"
+    git -C "$install_dir" checkout "$branch"
+    git -C "$install_dir" pull --ff-only origin "$branch"
+  fi
 elif [ -e "$install_dir" ]; then
   die "$install_dir already exists and is not a Git checkout"
 else

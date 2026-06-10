@@ -74,6 +74,7 @@ class IdaSession:
         self._ida_fixup = self._optional_import("ida_fixup")
         self._ida_auto = self._optional_import("ida_auto")
         self._ida_nalt = self._optional_import("ida_nalt")
+        self._db: Any = None
 
         if db_path is None:
             resolved_db, first_open = _database_path(self.binary)
@@ -81,6 +82,9 @@ class IdaSession:
         else:
             resolved_db = db_path
             needs_analysis = bool(needs_analysis)
+        self.analysis_command = (
+            "IDA Domain auto-analysis" if needs_analysis else "IDA database inventory"
+        )
 
         self._cache_db = None if is_ida_database(self.binary) else resolved_db
         if needs_analysis:
@@ -159,12 +163,15 @@ class IdaSession:
         self._strings_ready = True
 
     def close(self) -> None:
+        if self._db is None:
+            return
         try:
             self._db.close(save=self._opened_for_analysis)
         except Exception:  # noqa: BLE001
             pass
         finally:
             self._opened_for_analysis = False
+            self._db = None
 
     def database_path(self) -> Path | None:
         if self._cache_db is None:
@@ -180,8 +187,49 @@ class IdaSession:
             return
         self._save_and_reopen_database()
 
+    def release_parallel_resources(self) -> None:
+        if self._cache_db is not None:
+            self.prepare_parallel_workers()
+        self._clear_caches()
+        if self._db is None:
+            return
+        try:
+            self._db.close(save=False)
+        except Exception as exc:  # noqa: BLE001
+            raise BackendError("failed to close parent IDA database") from exc
+        self._db = None
+        self._opened_for_analysis = False
+        self._decompiler_ready = False
+
+    def restore_parallel_resources(self) -> None:
+        if self._db is not None:
+            return
+        resolved_db = self._cache_db
+        if resolved_db is None and is_ida_database(self.binary):
+            resolved_db = self.binary
+        if resolved_db is None:
+            return
+        self._open_existing_database(resolved_db)
+
+    def release_render_memory(self) -> None:
+        self._disasm_cache.clear()
+        self._decompile_cache.clear()
+        self._summary_cache.clear()
+        self._locals_cache.clear()
+        if self._ida_hexrays is None:
+            return
+        clear_cached = getattr(self._ida_hexrays, "clear_cached_cfuncs", None)
+        if callable(clear_cached):
+            try:
+                clear_cached()
+            except Exception:  # noqa: BLE001
+                pass
+
     def _save_and_reopen_database(self) -> None:
         if self._cache_db is None:
+            return
+        if self._db is None:
+            self._open_existing_database(self._cache_db)
             return
         try:
             self._db.close(save=True)
@@ -190,22 +238,29 @@ class IdaSession:
                 f"failed to save IDA database at {self._cache_db}"
             ) from exc
         self._opened_for_analysis = False
+        self._open_existing_database(self._cache_db)
+
+    def _open_existing_database(self, resolved_db: Path) -> None:
         options = self._Options(auto_analysis=False, new_database=False)
         try:
             self._db = self._Database.open(
-                str(self._cache_db), args=options, save_on_close=False
+                str(resolved_db), args=options, save_on_close=False
             )
         except Exception as exc:  # noqa: BLE001
             raise BackendError(
-                f"failed to reopen IDA database at {self._cache_db}"
+                f"failed to reopen IDA database at {resolved_db}"
             ) from exc
+        self._opened_for_analysis = False
+        self._clear_caches()
+        self.ensure_decompiler()
+
+    def _clear_caches(self) -> None:
         self._decompiler_ready = False
         self._disasm_cache.clear()
         self._decompile_cache.clear()
         self._summary_cache.clear()
         self._locals_cache.clear()
         self._primed.clear()
-        self.ensure_decompiler()
 
     def worker(self) -> "IdaSession":
         if self._cache_db is not None and self._cache_db.exists():
@@ -413,19 +468,10 @@ class IdaSession:
         for func in self._db.functions:
             name = self._db.functions.get_name(func) or f"sub_{func.start_ea:x}"
             segment_name = self._segment_name(func.start_ea)
-            self._prime(func.start_ea)
 
             flags = self._db.functions.get_flags(func)
             is_library = bool(flags & FunctionFlags.LIB)
             is_thunk = bool(flags & FunctionFlags.THUNK)
-            lvars = self._locals(func.start_ea)
-            args = sum(1 for item in lvars if bool(getattr(item, "is_argument", False)))
-            locals_count = sum(
-                1
-                for item in lvars
-                if not bool(getattr(item, "is_argument", False))
-                and not bool(getattr(item, "is_result", False))
-            )
             rows.append(
                 {
                     "offset": int(func.start_ea),
@@ -435,8 +481,8 @@ class IdaSession:
                     "calltype": None,
                     "noreturn": not bool(self._db.functions.does_return(func)),
                     "stackframe": int(getattr(func, "frsize", 0) or 0),
-                    "nlocals": locals_count,
-                    "nargs": args,
+                    "nlocals": 0,
+                    "nargs": 0,
                     "outdegree": 0,
                     "indegree": 0,
                     "is_library": is_library,
@@ -449,20 +495,14 @@ class IdaSession:
         return rows
 
     def disasm(self, address: int) -> str:
-        if address not in self._disasm_cache:
-            func = self._need_function(address)
-            self._disasm_cache[address] = "\n".join(self._function_disassembly(func))
-        return self._disasm_cache[address]
+        func = self._need_function(address)
+        return "\n".join(self._function_disassembly(func))
 
     def decompile(self, address: int) -> str:
-        if address not in self._decompile_cache:
-            self.ensure_decompiler()
-            func = self._need_function(address)
-            lines = self._function_pseudocode(func)
-            self._decompile_cache[address] = (
-                "\n".join(lines) if isinstance(lines, list) else str(lines)
-            )
-        return self._decompile_cache[address]
+        self.ensure_decompiler()
+        func = self._need_function(address)
+        lines = self._function_pseudocode(func)
+        return "\n".join(lines) if isinstance(lines, list) else str(lines)
 
     def function_summary(self, address: int) -> str:
         if address in self._summary_cache:
@@ -494,8 +534,7 @@ class IdaSession:
         ]
         if callee_names:
             lines.append(f"callee_names: {', '.join(callee_names)}")
-        self._summary_cache[address] = "\n".join(lines)
-        return self._summary_cache[address]
+        return "\n".join(lines)
 
     def calls_from(
         self, address: int, imports, functions
@@ -518,7 +557,7 @@ class IdaSession:
                     imported.add(name)
         return sorted(edges), sorted(name for name in imported if name)
 
-    def _resolve_thunk(self, func):
+    def _resolve_thunk(self, func: Any) -> Any:
         from ida_domain.functions import FunctionFlags
 
         current = func

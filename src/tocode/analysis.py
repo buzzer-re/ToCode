@@ -36,7 +36,6 @@ class BinaryAnalyzer:
         self.progress = progress or Progress()
         self.analysis: ProgramAnalysis | None = None
         self.analysis_seconds: float | None = None
-        self.progress.log(f"Loading {self.binary}")
 
     @property
     def backend_name(self) -> str:
@@ -158,6 +157,21 @@ class BinaryAnalyzer:
         prepare = getattr(self.session, "prepare_parallel_workers", None)
         if callable(prepare):
             prepare()
+
+    def release_parallel_resources(self) -> None:
+        release = getattr(self.session, "release_parallel_resources", None)
+        if callable(release):
+            release()
+
+    def restore_parallel_resources(self) -> None:
+        restore = getattr(self.session, "restore_parallel_resources", None)
+        if callable(restore):
+            restore()
+
+    def release_render_memory(self) -> None:
+        release = getattr(self.session, "release_render_memory", None)
+        if callable(release):
+            release()
 
     def _binary_facts(
         self, info: dict[str, Any], entries: list[dict[str, Any]]
@@ -398,6 +412,10 @@ def create_analyzer(
     )
     if progress is not None:
         progress.log(f"Using {choice.selected.upper()} as backend.")
+        # Log before constructing the session: opening (and, for a fresh binary,
+        # loading) the IDA database happens inside the session constructor and can
+        # take a while, so the user should see activity instead of a silent gap.
+        progress.log(f"Loading {Path(binary).resolve()}")
     if choice.selected == "ida":
         return BinaryAnalyzer(
             binary,
