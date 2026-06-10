@@ -93,13 +93,59 @@ def test_choose_jobs_auto_ida_budget_allows_parallel_for_small_database() -> Non
     )
 
 
-def test_requested_jobs_are_not_limited_by_available_memory() -> None:
+def test_requested_ida_jobs_are_capped_by_available_memory() -> None:
+    # Each IDA worker loads the whole database; 3 requested workers cannot fit in
+    # ~3.5 GB at 4 GB/worker, so the count is capped to avoid OOM-killed workers.
     assert (
         choose_jobs(
             function_count=300,
             analysis_seconds=0.2,
             requested=3,
             backend="ida",
+            cpu_count=32,
+            job_limit=64,
+            available_memory_mb=3500,
+            ida_worker_memory_mb=4096,
+        )
+        == 1
+    )
+
+
+def test_ida_memory_model_is_env_tunable(monkeypatch) -> None:
+    def select() -> int:
+        return choose_jobs(
+            function_count=18000,
+            analysis_seconds=20.0,
+            requested=8,
+            backend="ida",
+            cpu_count=8,
+            job_limit=16,
+            available_memory_mb=6800,
+            database_size_mb=1900,
+        )
+
+    for name in (
+        "TOCODE_IDA_DB_RESIDENT_FACTOR",
+        "TOCODE_IDA_WORKER_BASE_MEMORY_MB",
+        "TOCODE_IDA_WORKER_MEMORY_MB",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    # Default model caps a 1.9 GB database on ~6.8 GB to a single worker.
+    assert select() == 1
+    # Operators can relax the model without code changes.
+    monkeypatch.setenv("TOCODE_IDA_DB_RESIDENT_FACTOR", "0")
+    monkeypatch.setenv("TOCODE_IDA_WORKER_BASE_MEMORY_MB", "0")
+    monkeypatch.setenv("TOCODE_IDA_WORKER_MEMORY_MB", "1024")
+    assert select() == 6  # 6800 // 1024
+
+
+def test_requested_jobs_ignore_memory_for_non_ida_backends() -> None:
+    assert (
+        choose_jobs(
+            function_count=300,
+            analysis_seconds=0.2,
+            requested=3,
+            backend="r2",
             cpu_count=32,
             job_limit=64,
             available_memory_mb=3500,

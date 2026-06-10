@@ -74,6 +74,7 @@ class IdaSession:
         self._ida_fixup = self._optional_import("ida_fixup")
         self._ida_auto = self._optional_import("ida_auto")
         self._ida_nalt = self._optional_import("ida_nalt")
+        self._ida_xref = self._optional_import("ida_xref")
         self._db: Any = None
 
         if db_path is None:
@@ -118,13 +119,9 @@ class IdaSession:
 
         self._strings_ready = False
         self._decompiler_ready = False
-        self._disasm_cache: dict[int, str] = {}
-        self._decompile_cache: dict[int, str] = {}
-        self._summary_cache: dict[int, str] = {}
         self._locals_cache: dict[int, list[Any]] = {}
         self._imports_cache: list[dict[str, Any]] | None = None
         self._relocs_cache: list[dict[str, Any]] | None = None
-        self._primed: set[int] = set()
 
     def _optional_import(self, module: str):
         try:
@@ -145,22 +142,35 @@ class IdaSession:
     def analyze(self) -> None:
         if self._strings_ready:
             return
-        try:
-            from ida_domain.strings import StringListConfig, StringType
-
-            self._db.strings.rebuild(
-                StringListConfig(
-                    string_types=[StringType.C, StringType.C_16],
-                    min_len=4,
-                    only_ascii_7bit=False,
-                )
-            )
-        except Exception:  # noqa: BLE001
+        # An already-analyzed database (e.g. a reused `.i64`) usually carries a
+        # populated string list, so rescanning the whole image is wasted work.
+        # Only rebuild when the list is empty; never skip when there is nothing
+        # to lose.
+        if not self._has_strings():
             try:
-                self._db.strings.rebuild()
+                from ida_domain.strings import StringListConfig, StringType
+
+                self._db.strings.rebuild(
+                    StringListConfig(
+                        string_types=[StringType.C, StringType.C_16],
+                        min_len=4,
+                        only_ascii_7bit=False,
+                    )
+                )
             except Exception:  # noqa: BLE001
-                pass
+                try:
+                    self._db.strings.rebuild()
+                except Exception:  # noqa: BLE001
+                    pass
         self._strings_ready = True
+
+    def _has_strings(self) -> bool:
+        try:
+            for _ in self._db.strings:
+                return True
+        except Exception:  # noqa: BLE001
+            return False
+        return False
 
     def close(self) -> None:
         if self._db is None:
@@ -212,9 +222,6 @@ class IdaSession:
         self._open_existing_database(resolved_db)
 
     def release_render_memory(self) -> None:
-        self._disasm_cache.clear()
-        self._decompile_cache.clear()
-        self._summary_cache.clear()
         self._locals_cache.clear()
         if self._ida_hexrays is None:
             return
@@ -256,11 +263,7 @@ class IdaSession:
 
     def _clear_caches(self) -> None:
         self._decompiler_ready = False
-        self._disasm_cache.clear()
-        self._decompile_cache.clear()
-        self._summary_cache.clear()
         self._locals_cache.clear()
-        self._primed.clear()
 
     def worker(self) -> "IdaSession":
         if self._cache_db is not None and self._cache_db.exists():
@@ -505,8 +508,6 @@ class IdaSession:
         return "\n".join(lines) if isinstance(lines, list) else str(lines)
 
     def function_summary(self, address: int) -> str:
-        if address in self._summary_cache:
-            return self._summary_cache[address]
         func = self._need_function(address)
         signature = self._db.functions.get_signature(
             func
@@ -557,6 +558,24 @@ class IdaSession:
                     imported.add(name)
         return sorted(edges), sorted(name for name in imported if name)
 
+    def data_xrefs(self, addresses: Any) -> dict[int, list[tuple[int, bool]]]:
+        if self._ida_xref is None:
+            return {}
+        xref = self._ida_xref
+        write_type = int(getattr(xref, "dr_W", 2))
+        result: dict[int, list[tuple[int, bool]]] = {}
+        for address in addresses:
+            target = int(address)
+            refs: list[tuple[int, bool]] = []
+            block = xref.xrefblk_t()
+            ok = block.first_to(target, xref.XREF_DATA)
+            while ok:
+                refs.append((int(block.frm), int(block.type) == write_type))
+                ok = block.next_to()
+            if refs:
+                result[target] = refs
+        return result
+
     def _resolve_thunk(self, func: Any) -> Any:
         from ida_domain.functions import FunctionFlags
 
@@ -580,19 +599,6 @@ class IdaSession:
         if func is None:
             raise BackendError(f"IDA could not resolve function at 0x{address:x}")
         return func
-
-    def _prime(self, address: int) -> None:
-        if address in self._primed:
-            return
-        if self._ida_hexrays is not None:
-            try:
-                self.ensure_decompiler()
-                self._function_pseudocode(self._need_function(address))
-            except Exception:  # noqa: BLE001
-                pass
-        self._locals_cache.pop(address, None)
-        self._summary_cache.pop(address, None)
-        self._primed.add(address)
 
     def _locals(self, address: int) -> list[Any]:
         if address not in self._locals_cache:

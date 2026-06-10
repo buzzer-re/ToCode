@@ -59,6 +59,8 @@ class DecompilerSession(Protocol):
         self, address: int, imports: dict[int, Any], functions: dict[int, Any]
     ) -> tuple[list[int], list[str]]: ...
 
+    def data_xrefs(self, addresses: Any) -> dict[int, list[tuple[int, bool]]]: ...
+
 
 @dataclass(slots=True)
 class IdaProbe:

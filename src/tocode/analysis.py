@@ -69,7 +69,7 @@ class BinaryAnalyzer:
             or f"{self.session.backend_label} auto-analysis"
         )
         self.progress.log(f"Analyzing with {label}")
-        with self.progress.bar(total=15, desc="analyze", unit="step") as bar:
+        with self.progress.bar(total=16, desc="analyze", unit="step") as bar:
             self.session.analyze()
             bar.update(1)
             info = self.session.info()
@@ -91,6 +91,8 @@ class BinaryAnalyzer:
             strings = [self._string(row) for row in self.session.strings()]
             bar.update(1)
             flags = [self._flag(row) for row in self.session.flags()]
+            bar.update(1)
+            data_xrefs = self._data_xrefs(symbols, relocations, strings, flags)
             bar.update(1)
             routines = self._routines(self.session.functions(), imports, segments)
             bar.update(1)
@@ -128,6 +130,7 @@ class BinaryAnalyzer:
             import_calls=import_calls,
             roots=roots,
             thunks=thunks,
+            data_xrefs=data_xrefs,
         )
         self.analysis = analysis
         self.analysis_seconds = time.monotonic() - started
@@ -248,6 +251,28 @@ class BinaryAnalyzer:
                 segment=self._segment_name(address, segments),
             )
         return result
+
+    def _data_xrefs(
+        self,
+        symbols: list[SymbolEntry],
+        relocations: list[RelocationEntry],
+        strings: list[StringEntry],
+        flags: list[FlagEntry],
+    ) -> dict[int, list[tuple[int, bool]]]:
+        collect = getattr(self.session, "data_xrefs", None)
+        if not callable(collect):
+            return {}
+        addresses: set[int] = set()
+        addresses.update(item.vaddr for item in strings)
+        addresses.update(item.vaddr for item in symbols if not item.imported)
+        addresses.update(item.vaddr for item in relocations)
+        addresses.update(item.offset for item in flags)
+        if not addresses:
+            return {}
+        try:
+            return collect(addresses)
+        except Exception:  # noqa: BLE001
+            return {}
 
     def _call_graph(
         self,
