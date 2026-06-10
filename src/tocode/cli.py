@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 from .analysis import create_analyzer
@@ -102,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     args.out_dir = (
         args.out_dir.expanduser().resolve() if args.out_dir is not None else None
     )
+    started = time.monotonic()
     try:
         if not binary.is_file():
             parser.error(f"input must be a regular file: {binary}")
@@ -115,7 +117,15 @@ def main(argv: list[str] | None = None) -> int:
             f"Summary: functions={summary.function_count} "
             f"clusters={summary.cluster_count} failures={len(summary.failed_functions)}"
         )
+        print(f"Exported in {_format_duration(time.monotonic() - started)}")
     return 0
+
+
+def _format_duration(seconds: float) -> str:
+    if seconds >= 60:
+        minutes, secs = divmod(int(round(seconds)), 60)
+        return f"{minutes}m {secs}s"
+    return f"{seconds:.1f}s"
 
 
 def _run_one(
