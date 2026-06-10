@@ -247,6 +247,13 @@ def _select_render_workers(context: ExportContext) -> None:
             else None,
         )
         context.render_mode = "process" if context.worker_count > 1 else "single"
+        if is_ida and context.jobs is not None and context.worker_count < context.jobs:
+            context.progress.log(
+                f"Note: limiting to {context.worker_count} worker(s) instead of the "
+                f"requested {context.jobs} to fit available memory "
+                f"(each IDA worker loads the whole database; override with "
+                f"TOCODE_IDA_WORKER_MEMORY_MB)."
+            )
         context.progress.log(
             describe_jobs(
                 function_count=count,

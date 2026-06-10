@@ -93,13 +93,31 @@ def test_choose_jobs_auto_ida_budget_allows_parallel_for_small_database() -> Non
     )
 
 
-def test_requested_jobs_are_not_limited_by_available_memory() -> None:
+def test_requested_ida_jobs_are_capped_by_available_memory() -> None:
+    # Each IDA worker loads the whole database; 3 requested workers cannot fit in
+    # ~3.5 GB at 4 GB/worker, so the count is capped to avoid OOM-killed workers.
     assert (
         choose_jobs(
             function_count=300,
             analysis_seconds=0.2,
             requested=3,
             backend="ida",
+            cpu_count=32,
+            job_limit=64,
+            available_memory_mb=3500,
+            ida_worker_memory_mb=4096,
+        )
+        == 1
+    )
+
+
+def test_requested_jobs_ignore_memory_for_non_ida_backends() -> None:
+    assert (
+        choose_jobs(
+            function_count=300,
+            analysis_seconds=0.2,
+            requested=3,
+            backend="r2",
             cpu_count=32,
             job_limit=64,
             available_memory_mb=3500,

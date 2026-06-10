@@ -32,9 +32,20 @@ def choose_jobs(
 ) -> int:
     limit = job_limit if job_limit is not None else configured_job_limit()
     is_ida = backend.lower() == "ida"
-    # Explicit `--jobs N` is honored as-is; the operator has opted into N workers.
+    memory_ceiling = (
+        _ida_memory_ceiling(available_memory_mb, ida_worker_memory_mb, database_size_mb)
+        if is_ida
+        else None
+    )
+
+    # An explicit `--jobs N` is honored, but still capped by the memory budget for
+    # IDA: each worker loads the whole database, so N workers that cannot fit in
+    # RAM get OOM-killed mid-export, which is strictly worse than running fewer.
     if requested is not None:
-        return max(1, min(requested, function_count or 1, limit))
+        chosen = max(1, min(requested, function_count or 1, limit))
+        if memory_ceiling is not None:
+            chosen = min(chosen, memory_ceiling)
+        return max(1, chosen)
 
     if function_count < MIN_FUNCTIONS_FOR_AUTO or analysis_seconds is None:
         return 1
@@ -44,12 +55,8 @@ def choose_jobs(
     cpus = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
     backend_limit = MAX_AUTO_IDA_JOBS if is_ida else MAX_AUTO_JOBS
     ceiling = min(cpus, backend_limit, limit, function_count)
-    if is_ida:
-        memory_ceiling = _ida_memory_ceiling(
-            available_memory_mb, ida_worker_memory_mb, database_size_mb
-        )
-        if memory_ceiling is not None:
-            ceiling = min(ceiling, memory_ceiling)
+    if memory_ceiling is not None:
+        ceiling = min(ceiling, memory_ceiling)
     target = math.ceil(function_count / FUNCTIONS_PER_WORKER)
     return max(1, min(ceiling, target))
 
@@ -83,6 +90,8 @@ def describe_jobs(
     backend: str,
 ) -> str:
     if requested is not None:
+        if selected < requested:
+            return f"Workers: {selected} (requested {requested}, capped for memory)"
         return f"Workers: {selected} requested"
     if function_count < MIN_FUNCTIONS_FOR_AUTO:
         return f"Workers: 1 for {function_count} functions"
