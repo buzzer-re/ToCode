@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$InstallDir = (Join-Path $HOME "ToCode"),
+    [string]$InstallDir,
     [string]$Repo = "https://github.com/buzzer-re/ToCode.git",
     [string]$Branch = "main",
     [switch]$Dev
@@ -9,15 +9,61 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$script:PathWasUpdated = $false
+
+# When run from an existing ToCode checkout, install from it instead of
+# cloning a second copy. $PSScriptRoot is empty when piped through iex.
+$scriptDir = $PSScriptRoot
+if (-not $InstallDir) {
+    if ($scriptDir -and (Test-Path (Join-Path $scriptDir ".git")) -and (Test-Path (Join-Path $scriptDir "pyproject.toml"))) {
+        $InstallDir = $scriptDir
+    }
+    else {
+        $InstallDir = Join-Path $HOME "ToCode"
+    }
+}
+
 function Write-Step {
     param([string]$Message)
     Write-Host "==> $Message"
 }
 
 function Fail {
-    param([string]$Message)
-    Write-Error "install.ps1: $Message"
+    param(
+        [string]$Message,
+        [string[]]$Hints = @()
+    )
+    Write-Host ""
+    Write-Host "ToCode was not installed: $Message" -ForegroundColor Red
+    foreach ($hint in $Hints) {
+        Write-Host "    $hint" -ForegroundColor Yellow
+    }
     exit 1
+}
+
+function Assert-NativeSuccess {
+    param(
+        [string]$Message,
+        [string[]]$Hints = @()
+    )
+    if ($LASTEXITCODE -ne 0) {
+        Fail "$Message (exit code $LASTEXITCODE)." $Hints
+    }
+}
+
+# Runs a native command with stderr suppressed. Under
+# $ErrorActionPreference = "Stop", Windows PowerShell turns redirected native
+# stderr into a terminating NativeCommandError, so relax the preference first.
+function Invoke-Quiet {
+    param([scriptblock]$Command)
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Command 2>$null
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
 }
 
 function Test-Command {
@@ -38,16 +84,16 @@ function Get-PythonCommand {
             continue
         }
 
-        $args = @()
+        $extraArgs = @()
         if ($candidate.Count -gt 1) {
-            $args = $candidate[1..($candidate.Count - 1)]
+            $extraArgs = $candidate[1..($candidate.Count - 1)]
         }
 
-        & $name @args -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" 2>$null
+        Invoke-Quiet { & $name @extraArgs -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" } | Out-Null
         if ($LASTEXITCODE -eq 0) {
             return @{
                 Name = $name
-                Args = $args
+                Args = $extraArgs
             }
         }
     }
@@ -98,29 +144,46 @@ function Add-UserPath {
     if ($missingFromPersistentPath) {
         $newUserPath = if ($userPath) { "$userPath;$BinDir" } else { $BinDir }
         [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+        $script:PathWasUpdated = $true
         Write-Step "Added $BinDir to your user Path"
-        Write-Host "Open a new PowerShell or cmd session before running tocode outside this installer."
     }
 }
 
 if (-not (Test-Command "git")) {
-    Fail "git is required but was not found on PATH"
+    Fail "Git was not found on PATH." @(
+        "Install Git for Windows from https://git-scm.com/download/win, then run this installer again."
+    )
 }
 
 $gitDir = Join-Path $InstallDir ".git"
 if (Test-Path $gitDir) {
-    Write-Step "Updating ToCode at $InstallDir"
-    git -C $InstallDir fetch origin $Branch
-    git -C $InstallDir checkout $Branch
-    git -C $InstallDir pull --ff-only origin $Branch
+    if ($scriptDir -and ((Resolve-Path $InstallDir).Path.TrimEnd('\') -ieq (Resolve-Path $scriptDir).Path.TrimEnd('\'))) {
+        Write-Step "Installing ToCode from this checkout at $InstallDir"
+    }
+    else {
+        Write-Step "Updating ToCode at $InstallDir"
+        git -C $InstallDir fetch origin $Branch
+        Assert-NativeSuccess "could not fetch branch '$Branch' from origin"
+        git -C $InstallDir checkout $Branch
+        Assert-NativeSuccess "could not check out branch '$Branch' in $InstallDir"
+        git -C $InstallDir pull --ff-only origin $Branch
+        Assert-NativeSuccess "could not update the checkout at $InstallDir" @(
+            "The checkout may have local changes. Resolve them, or remove the directory and run this installer again."
+        )
+    }
 }
 elseif (Test-Path $InstallDir) {
-    Fail "$InstallDir already exists and is not a Git checkout"
+    Fail "$InstallDir already exists and is not a ToCode Git checkout." @(
+        "Move or delete it, or pick another location with: .\install.ps1 -InstallDir <path>"
+    )
 }
 else {
     Write-Step "Cloning ToCode into $InstallDir"
     git clone --branch $Branch $Repo $InstallDir
+    Assert-NativeSuccess "could not clone $Repo"
 }
+
+$binDir = $null
 
 if (Test-Command "uv") {
     Write-Step "Syncing local project environment with uv"
@@ -130,21 +193,24 @@ if (Test-Command "uv") {
     else {
         uv --directory $InstallDir sync --locked
     }
+    Assert-NativeSuccess "uv could not sync the project environment"
 
     Write-Step "Installing the tocode command with uv"
     uv tool install --force --editable $InstallDir
+    Assert-NativeSuccess "uv could not install the tocode command"
 
-    if (-not (Test-Command "tocode")) {
-        $toolBin = (& uv tool dir --bin 2>$null)
-        if ($LASTEXITCODE -eq 0 -and $toolBin) {
-            Add-UserPath -BinDir $toolBin
-        }
+    $toolBin = Invoke-Quiet { uv tool dir --bin }
+    if ($LASTEXITCODE -eq 0 -and $toolBin) {
+        $binDir = "$toolBin".Trim()
     }
 }
 else {
     $python = Get-PythonCommand
     if ($null -eq $python) {
-        Fail "Python 3.10 or newer is required when uv is not installed"
+        Fail "neither uv nor Python 3.10+ was found on PATH." @(
+            "Install uv from https://docs.astral.sh/uv/getting-started/installation/ (recommended),",
+            "or install Python 3.10 or newer from https://www.python.org/downloads/, then run this installer again."
+        )
     }
 
     Write-Step "Installing the tocode command with pip"
@@ -153,18 +219,55 @@ else {
         $package = "$InstallDir[dev]"
     }
     & $python.Name @($python.Args) -m pip install --user --editable $package
+    Assert-NativeSuccess "pip could not install ToCode"
 
-    $userBase = (& $python.Name @($python.Args) -c "import site; print(site.USER_BASE)")
-    if ($LASTEXITCODE -eq 0 -and $userBase) {
-        Add-UserPath -BinDir (Join-Path $userBase 'Scripts')
+    # The per-user scripts directory is versioned on Windows (for example
+    # %APPDATA%\Python\Python312\Scripts), so ask Python for the real path
+    # instead of assuming USER_BASE\Scripts.
+    $scriptsDir = Invoke-Quiet { & $python.Name @($python.Args) -c "import sysconfig; print(sysconfig.get_path('scripts', sysconfig.get_preferred_scheme('user')))" }
+    if ($LASTEXITCODE -eq 0 -and $scriptsDir) {
+        $binDir = "$scriptsDir".Trim()
     }
 }
 
-if (-not (Test-Command "tocode")) {
-    Fail "tocode was installed, but its bin directory is not on PATH"
+if ($binDir) {
+    Add-UserPath -BinDir $binDir
 }
 
-tocode --help | Out-Null
+if (Test-Command "tocode") {
+    tocode --help | Out-Null
+    Assert-NativeSuccess "tocode is installed but 'tocode --help' failed" @(
+        "Check the output above, or re-run this installer."
+    )
 
-Write-Step "ToCode is installed"
-Write-Host "Run: tocode <binary> -o <output_dir>"
+    Write-Host ""
+    Write-Host "ToCode is installed." -ForegroundColor Green
+    if ($script:PathWasUpdated) {
+        Write-Host "Your PATH was updated for future sessions. If 'tocode' is not recognized in an already-open terminal, open a new one."
+    }
+    Write-Host "Run: tocode <binary> -o <output_dir>"
+    exit 0
+}
+
+$tocodeExe = $null
+if ($binDir) {
+    $tocodeExe = Join-Path $binDir "tocode.exe"
+}
+
+if ($tocodeExe -and (Test-Path $tocodeExe)) {
+    Write-Host ""
+    Write-Host "ToCode is installed." -ForegroundColor Green
+    Write-Host "The tocode command lives in $binDir, which was added to your PATH, but this terminal does not pick up the change automatically."
+    Write-Host "Open a new PowerShell window, then run: tocode <binary> -o <output_dir>"
+    exit 0
+}
+
+$hints = @()
+if ($binDir) {
+    $hints += "Expected it in $binDir - check that directory and add it to your PATH if it is there."
+}
+else {
+    $hints += "Could not determine the tool bin directory. Add the directory containing tocode.exe to your PATH manually."
+}
+$hints += "You can also run ToCode without PATH changes: uv --directory $InstallDir run tocode --help"
+Fail "the install finished, but the tocode command could not be located." $hints
