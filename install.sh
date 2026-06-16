@@ -4,6 +4,7 @@ set -euo pipefail
 repo_url="${TOCODE_REPO_URL:-https://github.com/buzzer-re/ToCode.git}"
 branch="${TOCODE_BRANCH:-main}"
 with_dev=false
+with_full=false
 tocode_bin_dir=""
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
@@ -27,6 +28,7 @@ Options:
   --repo URL       Git repository URL. Default: https://github.com/buzzer-re/ToCode.git
   --branch NAME    Branch to install. Default: main
   --dev            Also install development extras in the local checkout
+  --full           Install all decompiler backends, including the angr fallback
   -h, --help       Show this help
 EOF
 }
@@ -124,6 +126,10 @@ while [ "$#" -gt 0 ]; do
       with_dev=true
       shift
       ;;
+    --full)
+      with_full=true
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -154,13 +160,22 @@ else
   git clone --branch "$branch" "$repo_url" "$install_dir"
 fi
 
+# Build the list of optional dependency groups to install. "dev" pulls in the
+# test tooling; "full"/angr installs the pure-Python fallback backend.
+uv_extras=""
+pip_extras=""
+if [ "$with_dev" = true ]; then
+  uv_extras="$uv_extras --extra dev"
+  pip_extras="dev"
+fi
+if [ "$with_full" = true ]; then
+  uv_extras="$uv_extras --extra angr"
+  pip_extras="${pip_extras:+$pip_extras,}angr"
+fi
+
 if command -v uv >/dev/null 2>&1; then
   info "Syncing local project environment with uv"
-  if [ "$with_dev" = true ]; then
-    uv --directory "$install_dir" sync --locked --extra dev
-  else
-    uv --directory "$install_dir" sync --locked
-  fi
+  uv --directory "$install_dir" sync --locked $uv_extras
 
   info "Installing the tocode command with uv"
   uv tool install --force --editable "$install_dir"
@@ -181,8 +196,8 @@ else
       "or install Python 3.10 or newer, then run this installer again."
 
   info "Installing the tocode command with pip"
-  if [ "$with_dev" = true ]; then
-    "$python_bin" -m pip install --user --editable "${install_dir}[dev]"
+  if [ -n "$pip_extras" ]; then
+    "$python_bin" -m pip install --user --editable "${install_dir}[$pip_extras]"
   else
     "$python_bin" -m pip install --user --editable "$install_dir"
   fi

@@ -3,7 +3,8 @@ param(
     [string]$InstallDir,
     [string]$Repo = "https://github.com/buzzer-re/ToCode.git",
     [string]$Branch = "main",
-    [switch]$Dev
+    [switch]$Dev,
+    [switch]$Full
 )
 
 Set-StrictMode -Version Latest
@@ -185,14 +186,22 @@ else {
 
 $binDir = $null
 
+# Build the list of optional dependency groups to install. "dev" pulls in the
+# test tooling; -Full installs the angr pure-Python fallback backend.
+$uvExtras = @()
+$pipExtras = @()
+if ($Dev) {
+    $uvExtras += @("--extra", "dev")
+    $pipExtras += "dev"
+}
+if ($Full) {
+    $uvExtras += @("--extra", "angr")
+    $pipExtras += "angr"
+}
+
 if (Test-Command "uv") {
     Write-Step "Syncing local project environment with uv"
-    if ($Dev) {
-        uv --directory $InstallDir sync --locked --extra dev
-    }
-    else {
-        uv --directory $InstallDir sync --locked
-    }
+    uv --directory $InstallDir sync --locked @uvExtras
     Assert-NativeSuccess "uv could not sync the project environment"
 
     Write-Step "Installing the tocode command with uv"
@@ -215,8 +224,8 @@ else {
 
     Write-Step "Installing the tocode command with pip"
     $package = $InstallDir
-    if ($Dev) {
-        $package = "$InstallDir[dev]"
+    if ($pipExtras.Count -gt 0) {
+        $package = "$InstallDir[$($pipExtras -join ',')]"
     }
     & $python.Name @($python.Args) -m pip install --user --editable $package
     Assert-NativeSuccess "pip could not install ToCode"
