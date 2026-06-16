@@ -29,7 +29,7 @@ def parse_jobs(value: str) -> int | None:
 
 def build_parser() -> argparse.ArgumentParser:
     default_backend = os.environ.get("TOCODE_BACKEND", "auto").strip().lower()
-    if default_backend not in {"auto", "ida", "r2"}:
+    if default_backend not in {"auto", "ida", "r2", "angr"}:
         default_backend = "auto"
     parser = argparse.ArgumentParser(
         prog="tocode",
@@ -45,9 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--backend",
-        choices=("auto", "ida", "r2"),
+        choices=("auto", "ida", "r2", "angr"),
         default=default_backend,
-        help="Decompiler backend: prefer IDA when available, otherwise use r2 (default: TOCODE_BACKEND or auto).",
+        help="Decompiler backend: auto prefers IDA, then r2, then angr as a last-resort fallback (default: TOCODE_BACKEND or auto).",
     )
     parser.add_argument(
         "--idadir",

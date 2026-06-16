@@ -5,14 +5,15 @@ import importlib
 import importlib.util
 import os
 from pathlib import Path
+import shutil
 import sys
 from typing import Any, Literal, Protocol
 
 from ..errors import ToCodeError
 
 
-BackendRequest = Literal["auto", "ida", "r2"]
-BackendName = Literal["ida", "r2"]
+BackendRequest = Literal["auto", "ida", "r2", "angr"]
+BackendName = Literal["ida", "r2", "angr"]
 IDA_DATABASE_SUFFIXES = frozenset({".i64", ".idb"})
 
 
@@ -85,12 +86,25 @@ def choose_backend(
     ida_domain_path: Path | None = None,
 ) -> BackendChoice:
     if input_path is not None and is_ida_database(input_path):
-        if requested == "r2":
+        if requested in {"r2", "angr"}:
             raise ToCodeError("IDA database input requires the IDA backend")
         requested = "ida"
 
     if requested == "r2":
+        if not probe_r2():
+            raise ToCodeError(
+                "r2 backend requested but unavailable: r2pipe or the r2 "
+                "executable is missing"
+            )
         return BackendChoice(requested, "r2", "selected by CLI")
+
+    if requested == "angr":
+        if not probe_angr():
+            raise ToCodeError(
+                "angr backend requested but unavailable: install with "
+                "`pip install tocode-cli[angr]`"
+            )
+        return BackendChoice(requested, "angr", "selected by CLI")
 
     probe = probe_ida(idadir=idadir, ida_domain_path=ida_domain_path)
     if requested == "ida":
@@ -98,9 +112,34 @@ def choose_backend(
             raise ToCodeError(f"IDA backend requested but unavailable: {probe.reason}")
         return BackendChoice(requested, "ida", probe.reason)
 
+    # auto: prefer IDA, then radare2, then angr as a last resort.
     if probe.available:
         return BackendChoice(requested, "ida", probe.reason)
-    return BackendChoice(requested, "r2", f"IDA unavailable ({probe.reason}); using r2")
+    if probe_r2():
+        return BackendChoice(
+            requested, "r2", f"IDA unavailable ({probe.reason}); using r2"
+        )
+    if probe_angr():
+        return BackendChoice(
+            requested,
+            "angr",
+            f"IDA and r2 unavailable ({probe.reason}); using angr",
+        )
+    raise ToCodeError(
+        "no decompiler backend available: IDA not found "
+        f"({probe.reason}), radare2 not found, and angr is not installed "
+        "(`pip install tocode-cli[angr]`)"
+    )
+
+
+def probe_r2() -> bool:
+    if importlib.util.find_spec("r2pipe") is None:
+        return False
+    return shutil.which("r2") is not None
+
+
+def probe_angr() -> bool:
+    return importlib.util.find_spec("angr") is not None
 
 
 def is_ida_database(path: Path) -> bool:

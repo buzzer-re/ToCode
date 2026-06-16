@@ -4,6 +4,7 @@ from pathlib import Path
 import time
 from typing import Any
 
+from .backends.angr import AngrSession
 from .backends.base import BackendRequest, DecompilerSession, choose_backend
 from .backends.ida import IdaSession
 from .backends.r2 import R2Session
@@ -445,6 +446,12 @@ def create_analyzer(
         return BinaryAnalyzer(
             binary,
             session=IdaSession(binary, idadir=idadir, ida_domain_path=ida_domain_path),
+            progress=progress,
+        )
+    if choice.selected == "angr":
+        return BinaryAnalyzer(
+            binary,
+            session=AngrSession(binary),
             progress=progress,
         )
     return BinaryAnalyzer(
