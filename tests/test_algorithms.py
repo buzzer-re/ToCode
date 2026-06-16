@@ -194,6 +194,56 @@ def test_ida_database_input_rejects_r2_backend(tmp_path) -> None:
         choose_backend("r2", input_path=db_path)
 
 
+def test_ida_database_input_rejects_angr_backend(tmp_path) -> None:
+    db_path = tmp_path / "sample.i64"
+    db_path.write_bytes(b"IDA")
+
+    with pytest.raises(ToCodeError):
+        choose_backend("angr", input_path=db_path)
+
+
+def _force_backend_probes(monkeypatch, *, ida: bool, r2: bool, angr: bool) -> None:
+    from tocode.backends import base
+
+    monkeypatch.setattr(
+        base,
+        "probe_ida",
+        lambda **_: base.IdaProbe(ida, "forced" if ida else "unavailable"),
+    )
+    monkeypatch.setattr(base, "probe_r2", lambda: r2)
+    monkeypatch.setattr(base, "probe_angr", lambda: angr)
+
+
+def test_auto_falls_back_to_angr_when_ida_and_r2_missing(monkeypatch) -> None:
+    _force_backend_probes(monkeypatch, ida=False, r2=False, angr=True)
+
+    choice = choose_backend("auto")
+
+    assert choice.selected == "angr"
+
+
+def test_auto_prefers_r2_over_angr(monkeypatch) -> None:
+    _force_backend_probes(monkeypatch, ida=False, r2=True, angr=True)
+
+    choice = choose_backend("auto")
+
+    assert choice.selected == "r2"
+
+
+def test_explicit_angr_requires_angr_installed(monkeypatch) -> None:
+    _force_backend_probes(monkeypatch, ida=False, r2=False, angr=False)
+
+    with pytest.raises(ToCodeError):
+        choose_backend("angr")
+
+
+def test_auto_with_no_backend_available_raises(monkeypatch) -> None:
+    _force_backend_probes(monkeypatch, ida=False, r2=False, angr=False)
+
+    with pytest.raises(ToCodeError):
+        choose_backend("auto")
+
+
 def test_r2_decompiler_probe_reports_missing_sleigh() -> None:
     class MissingSleighSession(R2Session):
         def __init__(self) -> None:

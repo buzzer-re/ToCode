@@ -53,7 +53,19 @@ sample_decompiler/
 
 ### Supported backends
 
-Currently, IDA (using the ida-domain/idapro Python libraries) and radare2 are supported. Other disassemblers may be added in the future.
+Three backends are supported, selected with `--backend` (default `auto`, which prefers them in this order):
+
+1. **IDA** – uses the ida-domain/idapro Python libraries (best decompilation quality).
+2. **radare2** – uses r2pipe with the r2ghidra decompiler.
+3. **angr** – a pure-Python fallback with no external tooling, so ToCode still runs when neither IDA nor radare2 is available. Install it with the optional extra:
+
+   ```bash
+   pip install tocode-cli[angr]   # or: uv sync --extra angr
+   ```
+
+   The angr export is structurally identical to the others (same files and metadata); its pseudo-C is lower quality than Hex-Rays or r2ghidra.
+
+Other disassemblers may be added in the future.
 
 ### Using
 

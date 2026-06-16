@@ -32,6 +32,15 @@ tocode = "tocode.cli:main"
 dev = [
   "pytest==8.4.2",
 ]
+angr = [
+  "angr>=9.2",
+]
+
+# angr is an optional backend dependency, so it may be absent from the type
+# checking environment. Ignore its missing stubs/imports rather than failing.
+[[tool.mypy.overrides]]
+module = ["angr.*"]
+ignore_missing_imports = true
 
 [tool.setuptools]
 package-dir = { "" = "src" }

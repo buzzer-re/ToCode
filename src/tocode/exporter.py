@@ -14,6 +14,7 @@ import tempfile
 from typing import Any
 
 from .analysis import BinaryAnalyzer
+from .backends.angr import AngrSession
 from .backends.base import is_ida_database
 from .backends.ida import IdaSession
 from .backends.ida import _cache_root as _ida_cache_root
@@ -1168,6 +1169,9 @@ def _open_worker(spec: WorkerSpec):
         session = R2Session(
             spec.binary, analysis_command=spec.analysis_command or "aaa"
         )
+        session.analyze()
+    elif spec.backend == "angr":
+        session = AngrSession(spec.binary)
         session.analyze()
     else:
         raise RuntimeError(f"unsupported backend for worker: {spec.backend}")
