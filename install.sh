@@ -203,23 +203,31 @@ else
       "Install uv from https://docs.astral.sh/uv/getting-started/installation/ (recommended)," \
       "or install Python 3.10 or newer, then run this installer again."
 
-  if ! "$python_bin" -m pip --version >/dev/null 2>&1; then
-    "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true
-  fi
-  "$python_bin" -m pip --version >/dev/null 2>&1 \
-    || die "$python_bin has no pip module available" \
-      "Install uv from https://docs.astral.sh/uv/getting-started/installation/ (recommended; it does not need pip)," \
-      "or install pip for this interpreter (for example: apt install python3-pip), then run this installer again."
+  # Install into a dedicated virtual environment rather than the system
+  # interpreter. Modern distros (and Homebrew) mark their Python as
+  # "externally managed" (PEP 668), so even `pip install --user` is refused;
+  # a venv sidesteps that and keeps ToCode's dependencies isolated.
+  venv_dir="$install_dir/.venv"
+  info "Creating an isolated environment at $venv_dir"
+  "$python_bin" -m venv "$venv_dir" \
+    || die "could not create a virtual environment at $venv_dir" \
+      "Install uv from https://docs.astral.sh/uv/getting-started/installation/ (recommended)," \
+      "or install the venv module (for example: apt install python3-venv), then run this installer again."
+
+  venv_python="$venv_dir/bin/python"
 
   info "Installing the tocode command with pip"
   if [ -n "$pip_extras" ]; then
-    "$python_bin" -m pip install --user --editable "${install_dir}[$pip_extras]"
+    "$venv_python" -m pip install --editable "${install_dir}[$pip_extras]"
   else
-    "$python_bin" -m pip install --user --editable "$install_dir"
+    "$venv_python" -m pip install --editable "$install_dir"
   fi
 
-  tocode_bin_dir="$("$python_bin" -c 'import sysconfig; print(sysconfig.get_path("scripts", sysconfig.get_preferred_scheme("user")))' 2>/dev/null \
-    || "$python_bin" -c 'import os, site; print(os.path.join(site.USER_BASE, "bin"))')"
+  # Expose only the tocode launcher on PATH; putting the whole venv bin on
+  # PATH would shadow the system python/pip.
+  tocode_bin_dir="$HOME/.local/bin"
+  mkdir -p "$tocode_bin_dir"
+  ln -sf "$venv_dir/bin/tocode" "$tocode_bin_dir/tocode"
   ensure_path "$tocode_bin_dir"
 fi
 
