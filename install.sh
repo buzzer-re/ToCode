@@ -162,8 +162,15 @@ fi
 
 # Build the list of optional dependency groups to install. "dev" pulls in the
 # test tooling; "full"/angr installs the pure-Python fallback backend.
+#
+# uv sync populates the project's .venv (used by `uv run` / development), while
+# uv tool install builds a separate isolated environment for the `tocode`
+# command. Runtime extras (angr) must be passed to BOTH or the installed
+# command will not see them. dev is build/test tooling, so it only belongs in
+# the project venv, not the tool environment.
 uv_extras=""
 pip_extras=""
+tool_extras=""
 if [ "$with_dev" = true ]; then
   uv_extras="$uv_extras --extra dev"
   pip_extras="dev"
@@ -171,6 +178,7 @@ fi
 if [ "$with_full" = true ]; then
   uv_extras="$uv_extras --extra angr"
   pip_extras="${pip_extras:+$pip_extras,}angr"
+  tool_extras="angr"
 fi
 
 if command -v uv >/dev/null 2>&1; then
@@ -178,7 +186,7 @@ if command -v uv >/dev/null 2>&1; then
   uv --directory "$install_dir" sync --locked $uv_extras
 
   info "Installing the tocode command with uv"
-  uv tool install --force --editable "$install_dir"
+  uv tool install --force --editable "${install_dir}${tool_extras:+[$tool_extras]}"
 
   tocode_bin_dir="$(uv tool dir --bin 2>/dev/null || true)"
   if ! command -v tocode >/dev/null 2>&1; then
@@ -194,6 +202,14 @@ else
     || die "$python_bin is older than Python 3.10" \
       "Install uv from https://docs.astral.sh/uv/getting-started/installation/ (recommended)," \
       "or install Python 3.10 or newer, then run this installer again."
+
+  if ! "$python_bin" -m pip --version >/dev/null 2>&1; then
+    "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  fi
+  "$python_bin" -m pip --version >/dev/null 2>&1 \
+    || die "$python_bin has no pip module available" \
+      "Install uv from https://docs.astral.sh/uv/getting-started/installation/ (recommended; it does not need pip)," \
+      "or install pip for this interpreter (for example: apt install python3-pip), then run this installer again."
 
   info "Installing the tocode command with pip"
   if [ -n "$pip_extras" ]; then

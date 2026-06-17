@@ -188,8 +188,15 @@ $binDir = $null
 
 # Build the list of optional dependency groups to install. "dev" pulls in the
 # test tooling; -Full installs the angr pure-Python fallback backend.
+#
+# uv sync populates the project's .venv (used by `uv run` / development), while
+# uv tool install builds a separate isolated environment for the `tocode`
+# command. Runtime extras (angr) must be passed to BOTH or the installed
+# command will not see them. dev is build/test tooling, so it only belongs in
+# the project venv, not the tool environment.
 $uvExtras = @()
 $pipExtras = @()
+$toolExtras = @()
 if ($Dev) {
     $uvExtras += @("--extra", "dev")
     $pipExtras += "dev"
@@ -197,6 +204,7 @@ if ($Dev) {
 if ($Full) {
     $uvExtras += @("--extra", "angr")
     $pipExtras += "angr"
+    $toolExtras += "angr"
 }
 
 if (Test-Command "uv") {
@@ -205,7 +213,11 @@ if (Test-Command "uv") {
     Assert-NativeSuccess "uv could not sync the project environment"
 
     Write-Step "Installing the tocode command with uv"
-    uv tool install --force --editable $InstallDir
+    $toolTarget = $InstallDir
+    if ($toolExtras.Count -gt 0) {
+        $toolTarget = "$InstallDir[$($toolExtras -join ',')]"
+    }
+    uv tool install --force --editable $toolTarget
     Assert-NativeSuccess "uv could not install the tocode command"
 
     $toolBin = Invoke-Quiet { uv tool dir --bin }
@@ -220,6 +232,18 @@ else {
             "Install uv from https://docs.astral.sh/uv/getting-started/installation/ (recommended),",
             "or install Python 3.10 or newer from https://www.python.org/downloads/, then run this installer again."
         )
+    }
+
+    Invoke-Quiet { & $python.Name @($python.Args) -m pip --version } | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Invoke-Quiet { & $python.Name @($python.Args) -m ensurepip --upgrade } | Out-Null
+        Invoke-Quiet { & $python.Name @($python.Args) -m pip --version } | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Fail "the selected Python has no pip module available." @(
+                "Install uv from https://docs.astral.sh/uv/getting-started/installation/ (recommended; it does not need pip),",
+                "or install pip for this interpreter, then run this installer again."
+            )
+        }
     }
 
     Write-Step "Installing the tocode command with pip"
