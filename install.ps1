@@ -234,33 +234,36 @@ else {
         )
     }
 
-    Invoke-Quiet { & $python.Name @($python.Args) -m pip --version } | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Invoke-Quiet { & $python.Name @($python.Args) -m ensurepip --upgrade } | Out-Null
-        Invoke-Quiet { & $python.Name @($python.Args) -m pip --version } | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Fail "the selected Python has no pip module available." @(
-                "Install uv from https://docs.astral.sh/uv/getting-started/installation/ (recommended; it does not need pip),",
-                "or install pip for this interpreter, then run this installer again."
-            )
-        }
-    }
+    # Install into a dedicated virtual environment rather than the system
+    # interpreter. Some Python installs (Homebrew, distro packages) mark
+    # themselves "externally managed" (PEP 668), refusing even
+    # `pip install --user`; a venv sidesteps that and isolates dependencies.
+    $venvDir = Join-Path $InstallDir ".venv"
+    Write-Step "Creating an isolated environment at $venvDir"
+    & $python.Name @($python.Args) -m venv $venvDir
+    Assert-NativeSuccess "could not create a virtual environment at $venvDir" @(
+        "Install uv from https://docs.astral.sh/uv/getting-started/installation/ (recommended)."
+    )
+
+    $venvScripts = Join-Path $venvDir "Scripts"
+    $venvPython = Join-Path $venvScripts "python.exe"
 
     Write-Step "Installing the tocode command with pip"
     $package = $InstallDir
     if ($pipExtras.Count -gt 0) {
         $package = "$InstallDir[$($pipExtras -join ',')]"
     }
-    & $python.Name @($python.Args) -m pip install --user --editable $package
+    & $venvPython -m pip install --editable $package
     Assert-NativeSuccess "pip could not install ToCode"
 
-    # The per-user scripts directory is versioned on Windows (for example
-    # %APPDATA%\Python\Python312\Scripts), so ask Python for the real path
-    # instead of assuming USER_BASE\Scripts.
-    $scriptsDir = Invoke-Quiet { & $python.Name @($python.Args) -c "import sysconfig; print(sysconfig.get_path('scripts', sysconfig.get_preferred_scheme('user')))" }
-    if ($LASTEXITCODE -eq 0 -and $scriptsDir) {
-        $binDir = "$scriptsDir".Trim()
+    # Expose only the tocode launcher on PATH; adding the whole venv Scripts
+    # dir would shadow the system python/pip.
+    $userBin = Join-Path $env:LOCALAPPDATA "ToCode\bin"
+    if (-not (Test-Path $userBin)) {
+        New-Item -ItemType Directory -Path $userBin -Force | Out-Null
     }
+    Copy-Item -Force (Join-Path $venvScripts "tocode.exe") (Join-Path $userBin "tocode.exe")
+    $binDir = $userBin
 }
 
 if ($binDir) {
