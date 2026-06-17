@@ -14,7 +14,6 @@ import tempfile
 from typing import Any
 
 from .analysis import BinaryAnalyzer
-from .backends.angr import AngrSession
 from .backends.base import is_ida_database
 from .backends.ida import IdaSession
 from .backends.ida import _cache_root as _ida_cache_root
@@ -1171,6 +1170,10 @@ def _open_worker(spec: WorkerSpec):
         )
         session.analyze()
     elif spec.backend == "angr":
+        # Imported lazily so non-angr exports never pay angr's slow, noisy
+        # native-extension import at startup.
+        from .backends.angr import AngrSession
+
         session = AngrSession(spec.binary)
         session.analyze()
     else:
