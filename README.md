@@ -60,9 +60,9 @@ Three backends are supported, selected with `--backend` (default `auto`, which p
 3. **angr** – a pure-Python fallback with no external tooling, so ToCode still runs when neither IDA nor radare2 is available. It is an optional extra (it is large: ~450 MB of native dependencies), so it is not installed by default. Get it in any of these ways:
 
    ```bash
-   bash ./install.sh --full          # recommended: installs every backend
-   pip install tocode-cli[angr]      # or, with pip directly
-   uv sync --extra angr              # or, in a local checkout
+   bash ./install.sh --full                       # recommended: installs every backend
+   pip install tocode-cli[angr]                   # or, with pip directly
+   uv tool install --force --editable '.[angr]'   # or, from a local checkout
    ```
 
    The angr export is structurally identical to the others (same files and metadata); its pseudo-C is lower quality than Hex-Rays or r2ghidra.
