@@ -7,10 +7,14 @@ from typing import Any, cast
 import pytest
 
 from tocode.exporter import (
+    CheckpointStore,
     _counts_from_summary,
+    _render_missing_with_timeout,
+    _uses_timeout_worker,
     _worker_spec,
     export_binary,
     fallback_prototype,
+    render_and_write_source_tree,
     render_one,
     tree_safe_function,
 )
@@ -19,8 +23,10 @@ from tocode.naming import NameBook
 from tocode.progress import Progress
 from tocode.schema import (
     BinaryFacts,
+    Cluster,
     FunctionRange,
     ProgramAnalysis,
+    RenderedFunction,
     Routine,
     Segment,
     StringEntry,
@@ -269,7 +275,7 @@ def test_export_binary_resumes_from_checkpoint_after_interrupt(tmp_path: Path) -
     assert (export_root / ".tocode" / "checkpoint.json").is_file()
     log_text = (export_root / "tocode.log").read_text(encoding="utf-8")
     assert "Export interrupted" in log_text
-    assert "export main 0x1000 done" in log_text
+    assert "export main 0x1000 - 48 bytes done" in log_text
 
     resumed = CountingAnalyzer(analysis)
     summary = export_binary(
@@ -282,8 +288,9 @@ def test_export_binary_resumes_from_checkpoint_after_interrupt(tmp_path: Path) -
     assert summary.function_count == 2
     assert not (export_root / ".tocode").exists()
     resumed_log = (export_root / "tocode.log").read_text(encoding="utf-8")
-    assert "export main 0x1000 cached" in resumed_log
-    assert "export helper 0x1050 done" in resumed_log
+    assert "Checkpoint: resuming at 1/2 with 1 cached functions" in resumed_log
+    assert "export main 0x1000 - 48 bytes cached" not in resumed_log
+    assert "export helper 0x1050 - 32 bytes done" in resumed_log
 
 
 def test_export_binary_restart_ignores_checkpoint(tmp_path: Path) -> None:
@@ -335,6 +342,364 @@ def test_export_binary_restart_ignores_checkpoint(tmp_path: Path) -> None:
     assert restarted.decompile_calls == 1
     log_text = (export_root / "tocode.log").read_text(encoding="utf-8")
     assert "Checkpoint: discarded previous state (--restart)" in log_text
+
+
+def test_checkpoint_store_tracks_compact_resume_cursor(tmp_path: Path) -> None:
+    checkpoint = CheckpointStore(
+        root=tmp_path / "export",
+        cache_id="cache",
+        progress=Progress(enabled=False),
+    )
+    addresses = [0x1000, 0x1050, 0x1100]
+    checkpoint.start(
+        binary=tmp_path / "sample.bin", backend="fake", addresses=addresses
+    )
+
+    assert checkpoint.first_pending_index() == 0
+    checkpoint.save(
+        RenderedFunction(
+            address=0x1050,
+            c_name="helper",
+            prototype="int helper(void)",
+            c_text="int helper(void) { return 0; }",
+            asm_text="",
+            summary_text="",
+        )
+    )
+    assert checkpoint.first_pending_index() == 0
+    assert checkpoint.completed_count == 1
+
+    checkpoint.save(
+        RenderedFunction(
+            address=0x1000,
+            c_name="main",
+            prototype="int main(void)",
+            c_text="int main(void) { return 0; }",
+            asm_text="",
+            summary_text="",
+        )
+    )
+    assert checkpoint.first_pending_index() == 2
+    assert checkpoint.completed_count == 2
+
+    state = json.loads(
+        (tmp_path / "export" / ".tocode" / "checkpoint.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert state["schema_version"] == 2
+    assert state["next_index"] == 2
+    assert state["completed_ranges"] == [[0, 1]]
+
+
+def test_checkpoint_store_migrates_legacy_rendered_files(tmp_path: Path) -> None:
+    root = tmp_path / "export"
+    rendered_dir = root / ".tocode" / "rendered"
+    rendered_dir.mkdir(parents=True)
+    (root / ".tocode" / "checkpoint.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "interrupted",
+                "cache_id": "cache",
+                "completed": ["0x1000"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (rendered_dir / "0000000000001000.json").write_text("{}", encoding="utf-8")
+
+    checkpoint = CheckpointStore(
+        root=root, cache_id="cache", progress=Progress(enabled=False)
+    )
+    checkpoint.start(
+        binary=tmp_path / "sample.bin",
+        backend="fake",
+        addresses=[0x1000, 0x1050],
+    )
+
+    state = json.loads((root / ".tocode" / "checkpoint.json").read_text("utf-8"))
+    assert state["schema_version"] == 2
+    assert state["next_index"] == 1
+    assert state["completed_ranges"] == [[0, 0]]
+
+
+def test_stream_resume_reuses_completed_cluster_record(
+    tmp_path: Path, monkeypatch
+) -> None:
+    binary = tmp_path / "sample.bin"
+    binary.write_bytes(b"\x7fELF" + b"\x00" * 256)
+    routines = {
+        0x1000: Routine(
+            0x1000, "main", 48, "int main(void)", None, False, 0, 0, 0, 0, 0
+        ),
+        0x1050: Routine(
+            0x1050, "helper", 32, "int helper(void)", None, False, 0, 0, 0, 0, 0
+        ),
+        0x2000: Routine(
+            0x2000, "later", 24, "int later(void)", None, False, 0, 0, 0, 0, 0
+        ),
+    }
+    analysis = ProgramAnalysis(
+        binary=BinaryFacts(
+            path=binary,
+            arch="x86",
+            bits=64,
+            image_base=0x1000,
+            os_name="linux",
+            format_name="elf",
+            file_type="EXEC",
+            entrypoints=[0x1000],
+        ),
+        segments=[Segment(".text", 256, 256, "PROGBITS", "r-x", 0, 0x1000)],
+        routines=routines,
+        imports={},
+        exports=[],
+        symbols=[],
+        relocations=[],
+        strings=[],
+        flags=[],
+        callees={address: [] for address in routines},
+        callers={address: [] for address in routines},
+        import_calls={address: [] for address in routines},
+        roots=list(routines),
+        thunks=set(),
+    )
+    clusters = [
+        Cluster(0x1000, "cluster_0x1000", "", [0x1000, 0x1050]),
+        Cluster(0x2000, "cluster_0x2000", "", [0x2000]),
+    ]
+    root = tmp_path / "export"
+    checkpoint = CheckpointStore(
+        root=root, cache_id="cache", progress=Progress(enabled=False)
+    )
+    checkpoint.start(binary=binary, backend="fake", addresses=[0x1000, 0x1050, 0x2000])
+    names = NameBook(functions={}, imports={}, aliases={})
+
+    first = CountingAnalyzer(analysis)
+    render_and_write_source_tree(
+        analyzer=first,  # type: ignore[arg-type]
+        analysis=analysis,
+        clusters=clusters[:1],
+        src_dir=root / "src" / "raw",
+        asm_dir=root / "src" / "raw",
+        summary_dir=root / "src" / "raw",
+        include_dir=root / "include",
+        header_name="sample.h",
+        names=names,
+        prototypes={},
+        progress=Progress(enabled=False),
+        checkpoint=checkpoint,
+    )
+    assert first.decompile_calls == 2
+
+    original_load = CheckpointStore.load
+
+    def fail_on_completed_cluster(self: CheckpointStore, address: int):
+        if address in {0x1000, 0x1050}:
+            raise AssertionError("completed cluster should use the cluster record")
+        return original_load(self, address)
+
+    monkeypatch.setattr(CheckpointStore, "load", fail_on_completed_cluster)
+    resumed = CountingAnalyzer(analysis)
+    summary = render_and_write_source_tree(
+        analyzer=resumed,  # type: ignore[arg-type]
+        analysis=analysis,
+        clusters=clusters,
+        src_dir=root / "src" / "raw",
+        asm_dir=root / "src" / "raw",
+        summary_dir=root / "src" / "raw",
+        include_dir=root / "include",
+        header_name="sample.h",
+        names=names,
+        prototypes={},
+        progress=Progress(enabled=False),
+        checkpoint=checkpoint,
+    )
+
+    assert resumed.decompile_calls == 1
+    assert len(summary["sources"]) == 2
+    assert len(summary["ranges"]) == 3
+
+
+def test_export_binary_skips_oversized_function(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("TOCODE_MAX_FUNCTION_BYTES", "16")
+    binary = tmp_path / "sample.bin"
+    binary.write_bytes(b"\x7fELF" + b"\x00" * 256)
+    routine = Routine(0x1000, "main", 48, "int main(void)", None, False, 0, 0, 0, 0, 0)
+    analysis = ProgramAnalysis(
+        binary=BinaryFacts(
+            path=binary,
+            arch="x86",
+            bits=64,
+            image_base=0x1000,
+            os_name="linux",
+            format_name="elf",
+            file_type="EXEC",
+            entrypoints=[0x1000],
+        ),
+        segments=[Segment(".text", 128, 128, "PROGBITS", "r-x", 0, 0x1000)],
+        routines={routine.address: routine},
+        imports={},
+        exports=[],
+        symbols=[],
+        relocations=[],
+        strings=[],
+        flags=[],
+        callees={routine.address: []},
+        callers={routine.address: []},
+        import_calls={routine.address: []},
+        roots=[routine.address],
+        thunks=set(),
+    )
+    analyzer = CountingAnalyzer(analysis)
+
+    summary = export_binary(
+        analyzer,  # type: ignore[arg-type]
+        out_dir=tmp_path / "export",
+        progress=Progress(enabled=False),
+    )
+
+    assert analyzer.decompile_calls == 0
+    assert len(summary.failed_functions) == 1
+    source = next(summary.raw_src_dir.rglob("*.c")).read_text(encoding="utf-8")
+    assert "// too big to export:" in source
+    log_text = (summary.root_dir / "tocode.log").read_text(encoding="utf-8")
+    assert "export main 0x1000 - 48 bytes failed" in log_text
+
+
+def test_timeout_scheduler_requeues_other_inflight_functions(monkeypatch) -> None:
+    monkeypatch.setenv("TOCODE_FUNCTION_TIMEOUT_SECONDS", "1")
+    binary = Path("/bin/sample")
+    routines = {
+        0x1000: Routine(
+            0x1000, "slow", 48, "int slow(void)", None, False, 0, 0, 0, 0, 0
+        ),
+        0x1050: Routine(
+            0x1050, "first", 32, "int first(void)", None, False, 0, 0, 0, 0, 0
+        ),
+        0x1100: Routine(
+            0x1100, "second", 24, "int second(void)", None, False, 0, 0, 0, 0, 0
+        ),
+    }
+    analysis = ProgramAnalysis(
+        binary=BinaryFacts(
+            path=binary,
+            arch="x86",
+            bits=64,
+            image_base=0x1000,
+            os_name="linux",
+            format_name="elf",
+            file_type="EXEC",
+            entrypoints=[0x1000],
+        ),
+        segments=[],
+        routines=routines,
+        imports={},
+        exports=[],
+        symbols=[],
+        relocations=[],
+        strings=[],
+        flags=[],
+        callees={address: [] for address in routines},
+        callers={address: [] for address in routines},
+        import_calls={address: [] for address in routines},
+        roots=list(routines),
+        thunks=set(),
+    )
+    names = NameBook(
+        functions={address: routine.name for address, routine in routines.items()},
+        imports={},
+        aliases={},
+    )
+    wait_calls = 0
+    terminated: list[object] = []
+
+    class FakeFuture:
+        def __init__(self, address: int) -> None:
+            self.address = address
+
+        def result(self) -> tuple[int, RenderedFunction]:
+            routine = routines[self.address]
+            return (
+                self.address,
+                RenderedFunction(
+                    address=self.address,
+                    c_name=routine.name,
+                    prototype=routine.signature or f"int {routine.name}(void)",
+                    c_text=f"int {routine.name}(void) {{ return 0; }}",
+                    asm_text="",
+                    summary_text="",
+                ),
+            )
+
+    class FakeExecutor:
+        def __init__(self) -> None:
+            self.submitted: list[int] = []
+
+        def submit(self, _fn: object, address: int) -> FakeFuture:
+            self.submitted.append(address)
+            return FakeFuture(address)
+
+    first_executor = FakeExecutor()
+    second_executor = FakeExecutor()
+
+    def fake_wait(futures, timeout=None, return_when=None):  # noqa: ANN001, ANN202
+        nonlocal wait_calls
+        wait_calls += 1
+        future_set = set(futures)
+        if wait_calls == 1:
+            return set(), future_set
+        return future_set, set()
+
+    def fake_monotonic() -> float:
+        return 2.0 if wait_calls else 0.0
+
+    def fake_terminate(executor: object) -> None:
+        terminated.append(executor)
+
+    def fake_start_render_executor(**_kwargs) -> FakeExecutor:  # noqa: ANN003
+        return second_executor
+
+    monkeypatch.setattr("tocode.exporter.wait", fake_wait)
+    monkeypatch.setattr("tocode.exporter.time.monotonic", fake_monotonic)
+    monkeypatch.setattr("tocode.exporter._terminate_executor", fake_terminate)
+    monkeypatch.setattr(
+        "tocode.exporter._start_render_executor", fake_start_render_executor
+    )
+
+    rendered: dict[int, RenderedFunction] = {}
+    returned_executor = _render_missing_with_timeout(
+        executor=first_executor,  # type: ignore[arg-type]
+        worker_count=2,
+        spec=object(),  # type: ignore[arg-type]
+        analysis=analysis,
+        names=names,
+        addresses=[0x1000, 0x1050, 0x1100],
+        rendered=rendered,
+        checkpoint=None,
+        progress=None,
+        bar=None,
+    )
+
+    assert returned_executor is second_executor
+    assert first_executor.submitted == [0x1000, 0x1050]
+    assert second_executor.submitted == [0x1050, 0x1100]
+    assert terminated == [first_executor]
+    assert rendered[0x1000].failure is not None
+    assert rendered[0x1000].failure.message == "decompiler timed out after 1s"
+    assert rendered[0x1050].failure is None
+    assert rendered[0x1100].failure is None
+
+
+def test_timeout_worker_covers_angr_without_parallel(monkeypatch) -> None:
+    monkeypatch.setenv("TOCODE_FUNCTION_TIMEOUT_SECONDS", "300")
+
+    class AngrLikeAnalyzer:
+        backend_name = "angr"
+        supports_parallel = False
+
+    assert _uses_timeout_worker(cast(Any, AngrLikeAnalyzer()))
 
 
 def test_export_binary_publishes_ida_database(tmp_path: Path) -> None:

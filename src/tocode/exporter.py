@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import atexit
 from contextlib import nullcontext
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, as_completed, wait
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 import hashlib
@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+import time
 from typing import Any
 
 from . import __version__
@@ -68,6 +69,9 @@ TINY_CLUSTER_FUNCTIONS = 2
 TINY_CLUSTER_BYTES = 0x80
 MERGED_CLUSTER_FUNCTIONS = 12
 MERGED_CLUSTER_BYTES = 0x800
+DEFAULT_FUNCTION_TIMEOUT_SECONDS = 300
+DEFAULT_MAX_FUNCTION_BYTES = 2 * 1024 * 1024
+TIMEOUT_WORKER_BACKENDS = frozenset({"ida", "r2", "angr"})
 TREE_CALLING_CONVENTION_RX = re.compile(
     r"\b__(?:cdecl|fastcall|stdcall|thiscall|usercall|userpurge|noreturn)\b"
 )
@@ -84,7 +88,7 @@ _WORKER_NAMES: NameBook | None = None
 _TREE_WORKER_ANALYSIS: ProgramAnalysis | None = None
 _TREE_WORKER_RENDERED: dict[int, RenderedFunction] | None = None
 _TREE_WORKER_RAW_RANGES: dict[int, FunctionRange] | None = None
-CHECKPOINT_SCHEMA_VERSION = 1
+CHECKPOINT_SCHEMA_VERSION = 2
 
 
 @dataclass(slots=True)
@@ -93,6 +97,13 @@ class CheckpointStore:
     cache_id: str
     progress: Progress
     restart: bool = False
+    addresses: list[int] = field(default_factory=list, init=False)
+    _index_by_address: dict[int, int] = field(default_factory=dict, init=False)
+    _completed_indices: set[int] = field(default_factory=set, init=False)
+    _address_order_hash: str = field(default="", init=False)
+    _binary: str = field(default="", init=False)
+    _backend: str = field(default="", init=False)
+    _function_count: int = field(default=0, init=False)
 
     @property
     def state_dir(self) -> Path:
@@ -103,14 +114,29 @@ class CheckpointStore:
         return self.state_dir / "rendered"
 
     @property
+    def clusters_dir(self) -> Path:
+        return self.state_dir / "clusters"
+
+    @property
     def state_path(self) -> Path:
         return self.state_dir / "checkpoint.json"
 
-    def start(self, *, binary: Path, backend: str, address_count: int) -> None:
+    def start(self, *, binary: Path, backend: str, addresses: list[int]) -> None:
+        self.addresses = list(addresses)
+        self._index_by_address = {
+            address: index for index, address in enumerate(self.addresses)
+        }
+        self._address_order_hash = _address_order_hash(self.addresses)
+        self._binary = str(binary)
+        self._backend = backend
+        self._function_count = len(self.addresses)
+        self._completed_indices.clear()
+
         if self.restart and self.state_dir.exists():
             shutil.rmtree(self.state_dir)
             self.progress.log("Checkpoint: discarded previous state (--restart)")
-        existing = self._read_state()
+
+        existing = self._read_raw_state()
         if existing is None and self.state_dir.exists():
             shutil.rmtree(self.state_dir)
             self.progress.log("Checkpoint: existing state is invalid; starting fresh")
@@ -120,23 +146,49 @@ class CheckpointStore:
             self.progress.log(
                 "Checkpoint: existing state does not match this export; starting fresh"
             )
+
         self.rendered_dir.mkdir(parents=True, exist_ok=True)
-        completed = self.completed_addresses()
-        status = "resuming" if existing is not None and completed else "started"
-        self._write_state(
-            {
-                "schema_version": CHECKPOINT_SCHEMA_VERSION,
-                "status": status,
-                "cache_id": self.cache_id,
-                "binary": str(binary),
-                "backend": backend,
-                "function_count": address_count,
-                "completed": [f"0x{item:x}" for item in completed],
-            }
+        self.clusters_dir.mkdir(parents=True, exist_ok=True)
+        migrated = False
+        if existing is not None:
+            schema_version = existing.get("schema_version")
+            if schema_version == CHECKPOINT_SCHEMA_VERSION:
+                if existing.get("address_order_hash") == self._address_order_hash:
+                    self._completed_indices = self._indices_from_ranges(
+                        existing.get("completed_ranges", [])
+                    )
+                else:
+                    shutil.rmtree(self.state_dir)
+                    self.rendered_dir.mkdir(parents=True, exist_ok=True)
+                    self.clusters_dir.mkdir(parents=True, exist_ok=True)
+                    existing = None
+                    self.progress.log(
+                        "Checkpoint: function order changed; starting fresh"
+                    )
+            elif schema_version == 1:
+                self._completed_indices = self._scan_completed_indices()
+                migrated = bool(self._completed_indices)
+            else:
+                shutil.rmtree(self.state_dir)
+                self.rendered_dir.mkdir(parents=True, exist_ok=True)
+                self.clusters_dir.mkdir(parents=True, exist_ok=True)
+                existing = None
+                self.progress.log(
+                    "Checkpoint: unsupported state schema; starting fresh"
+                )
+
+        status = (
+            "resuming"
+            if existing is not None and self._completed_indices
+            else "started"
         )
-        if completed:
+        self._write_state_payload(status=status)
+        if self._completed_indices:
+            next_index = self.first_pending_index()
+            if migrated:
+                self.progress.log("Checkpoint: migrated previous saved state")
             self.progress.log(
-                f"Checkpoint: resuming with {len(completed)}/{address_count} cached functions"
+                f"Checkpoint: resuming at {next_index}/{self._function_count} with {self.completed_count} cached functions"
             )
         else:
             self.progress.log("Checkpoint: started")
@@ -164,12 +216,20 @@ class CheckpointStore:
             self._rendered_path(rendered.address),
             json.dumps(payload, indent=2, sort_keys=False) + "\n",
         )
+        self.mark_completed(rendered.address)
+
+    def mark_completed(self, address: int) -> None:
+        index = self._index_by_address.get(address)
+        if index is None:
+            return
+        self._completed_indices.add(index)
+        self._write_state_payload(status="resuming")
 
     def mark_interrupted(self) -> None:
-        self._refresh_completed(status="interrupted")
+        self._write_state_payload(status="interrupted")
 
     def mark_failed(self) -> None:
-        self._refresh_completed(status="failed")
+        self._write_state_payload(status="failed")
 
     def complete(self) -> None:
         if self.state_dir.exists():
@@ -177,35 +237,90 @@ class CheckpointStore:
         self.progress.log("Checkpoint: complete; removed saved state")
 
     def completed_addresses(self) -> list[int]:
-        if not self.rendered_dir.is_dir():
-            return []
-        values: list[int] = []
-        for path in self.rendered_dir.glob("*.json"):
-            try:
-                values.append(int(path.stem, 16))
-            except ValueError:
-                continue
-        return sorted(values)
+        return [self.addresses[index] for index in sorted(self._completed_indices)]
 
-    def _refresh_completed(self, *, status: str) -> None:
-        state = self._read_state() or {
+    @property
+    def completed_count(self) -> int:
+        return len(self._completed_indices)
+
+    def first_pending_index(self) -> int:
+        index = 0
+        while index < self._function_count and index in self._completed_indices:
+            index += 1
+        return index
+
+    def is_completed(self, address: int) -> bool:
+        index = self._index_by_address.get(address)
+        return index is not None and index in self._completed_indices
+
+    def covers_all(self, addresses: list[int]) -> bool:
+        return all(self.is_completed(address) for address in addresses)
+
+    def cluster_record_path(self, cluster: Cluster) -> Path:
+        return (
+            self.clusters_dir
+            / f"{cluster.root:016x}_{clean_path_component(cluster.label)}.json"
+        )
+
+    def load_cluster_record(self, cluster: Cluster) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(
+                self.cluster_record_path(cluster).read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            return None
+        if payload.get("cache_id") != self.cache_id:
+            return None
+        if payload.get("members") != [f"0x{address:x}" for address in cluster.members]:
+            return None
+        for key in ("source", "asm_file", "summary_file"):
+            path = payload.get(key)
+            if not isinstance(path, str) or not Path(path).is_file():
+                return None
+        return payload
+
+    def save_cluster_record(self, cluster: Cluster, block: dict[str, Any]) -> None:
+        payload = {
             "schema_version": CHECKPOINT_SCHEMA_VERSION,
             "cache_id": self.cache_id,
+            "cluster_root": f"0x{cluster.root:x}",
+            "label": cluster.label,
+            "members": [f"0x{address:x}" for address in cluster.members],
+            "source": str(block["source"]),
+            "asm_file": str(block["asm_file"]),
+            "summary_file": str(block["summary_file"]),
+            "ranges": [_function_range_to_json(item) for item in block["ranges"]],
+            "failures": [_function_failure_to_json(item) for item in block["failures"]],
         }
-        state["status"] = status
-        state["completed"] = [f"0x{item:x}" for item in self.completed_addresses()]
-        self._write_state(state)
+        write_text_atomic(
+            self.cluster_record_path(cluster),
+            json.dumps(payload, indent=2, sort_keys=False) + "\n",
+        )
 
-    def _read_state(self) -> dict[str, Any] | None:
+    def _read_raw_state(self) -> dict[str, Any] | None:
         try:
             payload = json.loads(self.state_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        if payload.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
-            return None
         return payload if isinstance(payload, dict) else None
 
-    def _write_state(self, payload: dict[str, Any]) -> None:
+    def _write_state_payload(self, *, status: str) -> None:
+        payload = {
+            "schema_version": CHECKPOINT_SCHEMA_VERSION,
+            "status": status,
+            "cache_id": self.cache_id,
+            "binary": self._binary,
+            "backend": self._backend,
+            "function_count": self._function_count,
+            "address_order_hash": self._address_order_hash,
+            "next_index": self.first_pending_index(),
+            "completed_count": self.completed_count,
+            "completed_ranges": self._ranges_from_indices(),
+            "last_address": f"0x{self.addresses[max(self._completed_indices)]:x}"
+            if self._completed_indices
+            else None,
+            "updated_at": int(time.time()),
+        }
         write_text_atomic(
             self.state_path,
             json.dumps(payload, indent=2, sort_keys=False) + "\n",
@@ -213,6 +328,46 @@ class CheckpointStore:
 
     def _rendered_path(self, address: int) -> Path:
         return self.rendered_dir / f"{address:016x}.json"
+
+    def _scan_completed_indices(self) -> set[int]:
+        if not self.rendered_dir.is_dir():
+            return set()
+        values: set[int] = set()
+        for path in self.rendered_dir.glob("*.json"):
+            try:
+                address = int(path.stem, 16)
+            except ValueError:
+                continue
+            index = self._index_by_address.get(address)
+            if index is not None:
+                values.add(index)
+        return values
+
+    def _indices_from_ranges(self, ranges: Any) -> set[int]:
+        output: set[int] = set()
+        if not isinstance(ranges, list):
+            return output
+        for item in ranges:
+            if not isinstance(item, list | tuple) or len(item) != 2:
+                continue
+            try:
+                start = int(item[0])
+                end = int(item[1])
+            except (TypeError, ValueError):
+                continue
+            if start < 0 or end < start:
+                continue
+            output.update(range(start, min(end, self._function_count - 1) + 1))
+        return output
+
+    def _ranges_from_indices(self) -> list[list[int]]:
+        output: list[list[int]] = []
+        for index in sorted(self._completed_indices):
+            if not output or index != output[-1][1] + 1:
+                output.append([index, index])
+            else:
+                output[-1][1] = index
+        return output
 
 
 def _rendered_to_json(item: RenderedFunction) -> dict[str, Any]:
@@ -255,10 +410,111 @@ def _rendered_from_json(payload: dict[str, Any]) -> RenderedFunction:
     )
 
 
-def _all_cached(checkpoint: CheckpointStore | None, addresses: list[int]) -> bool:
-    return checkpoint is not None and all(
-        checkpoint.load(address) is not None for address in addresses
+def _address_order_hash(addresses: list[int]) -> str:
+    data = ",".join(f"{address:x}" for address in addresses).encode()
+    return hashlib.sha256(data).hexdigest()
+
+
+def _function_failure_to_json(item: FunctionFailure) -> dict[str, Any]:
+    return {
+        "address": item.address,
+        "name": item.name,
+        "message": item.message,
+    }
+
+
+def _function_failure_from_json(payload: dict[str, Any]) -> FunctionFailure:
+    return FunctionFailure(
+        address=int(payload["address"]),
+        name=str(payload["name"]),
+        message=str(payload["message"]),
     )
+
+
+def _function_range_to_json(item: FunctionRange) -> dict[str, Any]:
+    return {
+        "address": item.address,
+        "name": item.name,
+        "c_file": str(item.c_file),
+        "c_line_start": item.c_line_start,
+        "c_line_end": item.c_line_end,
+        "asm_file": str(item.asm_file),
+        "asm_line_start": item.asm_line_start,
+        "asm_line_end": item.asm_line_end,
+        "arg_count": item.arg_count,
+        "local_count": item.local_count,
+    }
+
+
+def _function_range_from_json(payload: dict[str, Any]) -> FunctionRange:
+    return FunctionRange(
+        address=int(payload["address"]),
+        name=str(payload["name"]),
+        c_file=Path(str(payload["c_file"])),
+        c_line_start=int(payload["c_line_start"]),
+        c_line_end=int(payload["c_line_end"]),
+        asm_file=Path(str(payload["asm_file"])),
+        asm_line_start=int(payload["asm_line_start"]),
+        asm_line_end=int(payload["asm_line_end"]),
+        arg_count=None
+        if payload.get("arg_count") is None
+        else int(payload["arg_count"]),
+        local_count=None
+        if payload.get("local_count") is None
+        else int(payload["local_count"]),
+    )
+
+
+def _all_cached(checkpoint: CheckpointStore | None, addresses: list[int]) -> bool:
+    return checkpoint is not None and checkpoint.covers_all(addresses)
+
+
+def _cluster_record_block(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": Path(str(record["source"])),
+        "asm_file": Path(str(record["asm_file"])),
+        "summary_file": Path(str(record["summary_file"])),
+        "ranges": [
+            _function_range_from_json(item)
+            for item in record.get("ranges", [])
+            if isinstance(item, dict)
+        ],
+        "failures": [
+            _function_failure_from_json(item)
+            for item in record.get("failures", [])
+            if isinstance(item, dict)
+        ],
+    }
+
+
+def _append_cluster_block(
+    *,
+    block: dict[str, Any],
+    sources: list[Path],
+    asm_files: list[Path],
+    summaries: list[Path],
+    ranges: list[FunctionRange],
+    failures: list[FunctionFailure],
+) -> None:
+    sources.append(Path(block["source"]).resolve())
+    asm_files.append(Path(block["asm_file"]).resolve())
+    summaries.append(Path(block["summary_file"]).resolve())
+    ranges.extend(block["ranges"])
+    failures.extend(block["failures"])
+
+
+def _load_rendered_cluster(
+    checkpoint: CheckpointStore | None,
+    cluster: Cluster,
+) -> dict[int, RenderedFunction]:
+    rendered: dict[int, RenderedFunction] = {}
+    if checkpoint is None:
+        return rendered
+    for address in cluster.members:
+        cached = checkpoint.load(address)
+        if cached is not None:
+            rendered[address] = cached
+    return rendered
 
 
 @dataclass(slots=True)
@@ -409,7 +665,7 @@ def _prepare_checkpoint(context: ExportContext) -> None:
     checkpoint.start(
         binary=analysis.binary.path,
         backend=context.analyzer.backend_name,
-        address_count=len(context.addresses),
+        addresses=context.addresses,
     )
     context.checkpoint = checkpoint
 
@@ -688,7 +944,9 @@ def render_and_write_source_tree(
     checkpoint: CheckpointStore | None = None,
 ) -> dict[str, Any]:
     addresses = [address for cluster in clusters for address in cluster.members]
-    if worker_count > 1 and not _all_cached(checkpoint, addresses):
+    if (worker_count > 1 or _uses_timeout_worker(analyzer)) and not _all_cached(
+        checkpoint, addresses
+    ):
         try:
             return render_and_write_source_tree_parallel(
                 analyzer=analyzer,
@@ -707,6 +965,8 @@ def render_and_write_source_tree(
             )
         except Exception as exc:  # noqa: BLE001
             analyzer.restore_parallel_resources()
+            if _uses_timeout_worker(analyzer):
+                raise
             if progress is not None:
                 progress.log(
                     f"Warning: streaming workers failed ({exc}); retrying with the primary session"
@@ -726,47 +986,54 @@ def render_and_write_source_tree(
     )
     with bar_context as bar:
         for cluster in clusters:
-            c_path = _cluster_path(src_dir, cluster, c_file_name(cluster))
-            asm_path = _cluster_path(asm_dir, cluster, asm_file_name(cluster))
-            summary_path = _cluster_path(
-                summary_dir, cluster, summary_file_name(cluster)
-            )
-            c_path.parent.mkdir(parents=True, exist_ok=True)
-            asm_path.parent.mkdir(parents=True, exist_ok=True)
-            summary_path.parent.mkdir(parents=True, exist_ok=True)
-            include_path = Path(
-                os.path.relpath(include_dir / header_name, c_path.parent)
-            ).as_posix()
-            rendered: dict[int, RenderedFunction] = {}
+            if checkpoint is not None and checkpoint.covers_all(cluster.members):
+                record = checkpoint.load_cluster_record(cluster)
+                if record is not None:
+                    _append_cluster_block(
+                        block=_cluster_record_block(record),
+                        sources=sources,
+                        asm_files=asm_files,
+                        summaries=summaries,
+                        ranges=ranges,
+                        failures=failures,
+                    )
+                    if bar is not None:
+                        bar.update(len(cluster.members))
+                    continue
+            rendered = _load_rendered_cluster(checkpoint, cluster)
             for address in cluster.members:
-                rendered[address] = render_with_checkpoint(
-                    analyzer,
-                    analysis,
-                    address,
-                    names,
-                    checkpoint=checkpoint,
-                    progress=progress,
-                )
+                if address not in rendered:
+                    rendered[address] = render_with_checkpoint(
+                        analyzer,
+                        analysis,
+                        address,
+                        names,
+                        checkpoint=checkpoint,
+                        progress=progress,
+                    )
                 if bar is not None:
                     bar.update(1)
-            block = build_cluster_files(
+            block = _write_rendered_cluster(
                 analysis=analysis,
                 cluster=cluster,
-                header_include=include_path,
-                c_path=c_path,
-                asm_path=asm_path,
-                summary_path=summary_path,
+                src_dir=src_dir,
+                asm_dir=asm_dir,
+                summary_dir=summary_dir,
+                include_dir=include_dir,
+                header_name=header_name,
                 rendered=rendered,
                 prototypes=prototypes,
             )
-            write_text_atomic(c_path, block["c"])
-            write_text_atomic(asm_path, block["asm"])
-            write_text_atomic(summary_path, block["summary"])
-            sources.append(c_path.resolve())
-            asm_files.append(asm_path.resolve())
-            summaries.append(summary_path.resolve())
-            ranges.extend(block["ranges"])
-            failures.extend(block["failures"])
+            if checkpoint is not None:
+                checkpoint.save_cluster_record(cluster, block)
+            _append_cluster_block(
+                block=block,
+                sources=sources,
+                asm_files=asm_files,
+                summaries=summaries,
+                ranges=ranges,
+                failures=failures,
+            )
             release_memory = getattr(analyzer, "release_render_memory", None)
             if callable(release_memory):
                 release_memory()
@@ -822,54 +1089,75 @@ def render_and_write_source_tree_parallel(
         if progress
         else nullcontext()
     )
-    with bar_context as bar:
-        with ProcessPoolExecutor(
-            max_workers=worker_count,
-            mp_context=ctx,
-            initializer=_init_worker,
-            initargs=(spec, analysis, names),
-        ) as executor:
+    executor = ProcessPoolExecutor(
+        max_workers=worker_count,
+        mp_context=ctx,
+        initializer=_init_worker,
+        initargs=(spec, analysis, names),
+    )
+    try:
+        with bar_context as bar:
             _wait_for_streaming_workers(
                 executor=executor,
                 worker_count=worker_count,
                 progress=progress,
             )
             for cluster in clusters:
-                rendered: dict[int, RenderedFunction] = {}
-                missing: list[int] = []
-                for address in cluster.members:
-                    cached = (
-                        checkpoint.load(address) if checkpoint is not None else None
-                    )
-                    if cached is None:
-                        missing.append(address)
-                        if progress is not None:
-                            routine = analysis.routines[address]
-                            progress.file_log(f"export {routine.name} 0x{address:x}")
-                    else:
-                        rendered[address] = cached
-                        if progress is not None:
-                            routine = analysis.routines[address]
-                            progress.file_log(
-                                f"export {routine.name} 0x{address:x} cached"
-                            )
+                if checkpoint is not None and checkpoint.covers_all(cluster.members):
+                    record = checkpoint.load_cluster_record(cluster)
+                    if record is not None:
+                        _append_cluster_block(
+                            block=_cluster_record_block(record),
+                            sources=sources,
+                            asm_files=asm_files,
+                            summaries=summaries,
+                            ranges=ranges,
+                            failures=failures,
+                        )
                         if bar is not None:
-                            bar.update(1)
-                futures = {
-                    executor.submit(_render_in_worker, address): address
-                    for address in missing
-                }
-                for future in as_completed(futures):
-                    result_address, result = future.result()
-                    rendered[result_address] = result
-                    record_render_result(
-                        result,
-                        analysis,
+                            bar.update(len(cluster.members))
+                        continue
+                rendered = _load_rendered_cluster(checkpoint, cluster)
+                missing: list[int] = [
+                    address for address in cluster.members if address not in rendered
+                ]
+                for address in missing:
+                    if progress is not None:
+                        routine = analysis.routines[address]
+                        progress.file_log(_render_log_prefix(routine))
+                if bar is not None:
+                    completed_in_cluster = len(cluster.members) - len(missing)
+                    if completed_in_cluster:
+                        bar.update(completed_in_cluster)
+                if _function_timeout_seconds() > 0:
+                    executor = _render_missing_with_timeout(
+                        executor=executor,
+                        worker_count=worker_count,
+                        spec=spec,
+                        analysis=analysis,
+                        names=names,
+                        addresses=missing,
+                        rendered=rendered,
                         checkpoint=checkpoint,
                         progress=progress,
+                        bar=bar,
                     )
-                    if bar is not None:
-                        bar.update(1)
+                else:
+                    futures = {
+                        executor.submit(_render_in_worker, address): address
+                        for address in missing
+                    }
+                    for future in as_completed(futures):
+                        result_address, result = future.result()
+                        rendered[result_address] = result
+                        record_render_result(
+                            result,
+                            analysis,
+                            checkpoint=checkpoint,
+                            progress=progress,
+                        )
+                        if bar is not None:
+                            bar.update(1)
                 block = _write_rendered_cluster(
                     analysis=analysis,
                     cluster=cluster,
@@ -886,6 +1174,10 @@ def render_and_write_source_tree_parallel(
                 summaries.append(block["summary_file"])
                 ranges.extend(block["ranges"])
                 failures.extend(block["failures"])
+                if checkpoint is not None:
+                    checkpoint.save_cluster_record(cluster, block)
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
     return {
         "sources": sources,
@@ -1289,6 +1581,58 @@ def _safe_int(value: str) -> int | None:
         return None
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(0, value)
+
+
+def _function_timeout_seconds() -> int:
+    return _env_int("TOCODE_FUNCTION_TIMEOUT_SECONDS", DEFAULT_FUNCTION_TIMEOUT_SECONDS)
+
+
+def _max_function_bytes() -> int:
+    return _env_int("TOCODE_MAX_FUNCTION_BYTES", DEFAULT_MAX_FUNCTION_BYTES)
+
+
+def _uses_timeout_worker(analyzer: BinaryAnalyzer) -> bool:
+    return (
+        analyzer.backend_name in TIMEOUT_WORKER_BACKENDS
+        and _function_timeout_seconds() > 0
+    )
+
+
+def _render_log_prefix(routine: Routine) -> str:
+    return f"export {routine.name} 0x{routine.address:x} - {routine.size} bytes"
+
+
+def _terminate_executor(executor: ProcessPoolExecutor) -> None:
+    processes = list(getattr(executor, "_processes", {}) or {})
+    if processes and not hasattr(processes[0], "terminate"):
+        processes = list((getattr(executor, "_processes", {}) or {}).values())
+    for process in processes:
+        terminate = getattr(process, "terminate", None)
+        if callable(terminate):
+            terminate()
+    executor.shutdown(wait=False, cancel_futures=True)
+    for process in processes:
+        join = getattr(process, "join", None)
+        if callable(join):
+            join(timeout=5)
+        is_alive = getattr(process, "is_alive", None)
+        kill = getattr(process, "kill", None)
+        if callable(is_alive) and is_alive() and callable(kill):
+            kill()
+            join_after_kill = getattr(process, "join", None)
+            if callable(join_after_kill):
+                join_after_kill(timeout=5)
+
+
 def render_with_checkpoint(
     session_like,
     analysis: ProgramAnalysis,
@@ -1302,11 +1646,11 @@ def render_with_checkpoint(
     cached = checkpoint.load(address) if checkpoint is not None else None
     if cached is not None:
         if progress is not None:
-            progress.file_log(f"export {routine.name} 0x{address:x} cached")
+            progress.file_log(f"{_render_log_prefix(routine)} cached")
         return cached
     if progress is not None:
-        progress.file_log(f"export {routine.name} 0x{address:x}")
-    rendered = render_one(session_like, analysis, routine, names)
+        progress.file_log(_render_log_prefix(routine))
+    rendered = render_one_with_limits(session_like, analysis, routine, names)
     record_render_result(
         rendered,
         analysis,
@@ -1329,7 +1673,11 @@ def record_render_result(
         return
     routine = analysis.routines.get(rendered.address)
     name = routine.name if routine is not None else rendered.c_name
-    prefix = f"export {name} 0x{rendered.address:x}"
+    prefix = (
+        _render_log_prefix(routine)
+        if routine is not None
+        else f"export {name} 0x{rendered.address:x}"
+    )
     if rendered.failure is None:
         progress.file_log(f"{prefix} done")
     else:
@@ -1346,7 +1694,9 @@ def render_functions(
     worker_count: int,
     checkpoint: CheckpointStore | None = None,
 ) -> dict[int, RenderedFunction]:
-    if worker_count <= 1 or _all_cached(checkpoint, addresses):
+    if (worker_count <= 1 and not _uses_timeout_worker(analyzer)) or _all_cached(
+        checkpoint, addresses
+    ):
         return _render_serial(
             analyzer, analysis, addresses, names, progress, checkpoint=checkpoint
         )
@@ -1362,6 +1712,8 @@ def render_functions(
         )
     except Exception as exc:  # noqa: BLE001
         analyzer.restore_parallel_resources()
+        if _uses_timeout_worker(analyzer):
+            raise
         progress.log(
             f"Warning: parallel export failed ({exc}); retrying with the primary session"
         )
@@ -1394,6 +1746,121 @@ def _render_serial(
     return output
 
 
+def _start_render_executor(
+    *,
+    worker_count: int,
+    spec: WorkerSpec,
+    analysis: ProgramAnalysis,
+    names: NameBook,
+    progress: Progress | None,
+) -> ProcessPoolExecutor:
+    ctx = multiprocessing.get_context("spawn")
+    executor = ProcessPoolExecutor(
+        max_workers=worker_count,
+        mp_context=ctx,
+        initializer=_init_worker,
+        initargs=(spec, analysis, names),
+    )
+    _wait_for_streaming_workers(
+        executor=executor,
+        worker_count=worker_count,
+        progress=progress,
+    )
+    return executor
+
+
+def _render_missing_with_timeout(
+    *,
+    executor: ProcessPoolExecutor,
+    worker_count: int,
+    spec: WorkerSpec,
+    analysis: ProgramAnalysis,
+    names: NameBook,
+    addresses: list[int],
+    rendered: dict[int, RenderedFunction],
+    checkpoint: CheckpointStore | None,
+    progress: Progress | None,
+    bar: Any,
+) -> ProcessPoolExecutor:
+    timeout = _function_timeout_seconds()
+    pending = list(addresses)
+    in_flight: dict[Any, tuple[int, float]] = {}
+    worker_count = max(1, worker_count)
+
+    while pending or in_flight:
+        while pending and len(in_flight) < worker_count:
+            address = pending.pop(0)
+            in_flight[executor.submit(_render_in_worker, address)] = (
+                address,
+                time.monotonic(),
+            )
+
+        if not in_flight:
+            continue
+
+        next_deadline = min(started + timeout for _, started in in_flight.values())
+        wait_timeout = max(0.0, next_deadline - time.monotonic())
+        done, _not_done = wait(
+            in_flight,
+            timeout=wait_timeout,
+            return_when=FIRST_COMPLETED,
+        )
+        if done:
+            for future in done:
+                _address, _started = in_flight.pop(future)
+                result_address, result = future.result()
+                rendered[result_address] = result
+                record_render_result(
+                    result,
+                    analysis,
+                    checkpoint=checkpoint,
+                    progress=progress,
+                )
+                if bar is not None:
+                    bar.update(1)
+            continue
+
+        now = time.monotonic()
+        timed_out = [
+            (future, address, started)
+            for future, (address, started) in in_flight.items()
+            if started + timeout <= now
+        ]
+        if not timed_out:
+            continue
+
+        future, address, _started = min(timed_out, key=lambda item: item[2])
+        in_flight.pop(future, None)
+        result = _timeout_stub(analysis, address, names, timeout)
+        routine = analysis.routines[address]
+        if progress is not None:
+            progress.log(
+                f"Warning: skipped {routine.name} at 0x{address:x} ({routine.size} bytes): decompiler timed out after {timeout}s"
+            )
+        rendered[address] = result
+        record_render_result(
+            result,
+            analysis,
+            checkpoint=checkpoint,
+            progress=progress,
+        )
+        if bar is not None:
+            bar.update(1)
+
+        retry = [retry_address for retry_address, _started in in_flight.values()]
+        pending = retry + pending
+        in_flight.clear()
+        _terminate_executor(executor)
+        executor = _start_render_executor(
+            worker_count=worker_count,
+            spec=spec,
+            analysis=analysis,
+            names=names,
+            progress=progress,
+        )
+    return executor
+
+
 def _render_parallel(
     analyzer: BinaryAnalyzer,
     analysis: ProgramAnalysis,
@@ -1409,45 +1876,61 @@ def _render_parallel(
     spec = _worker_spec(analyzer, copy_db=worker_count > 1)
     analyzer.release_parallel_resources()
     output: dict[int, RenderedFunction] = {}
+    completed: list[int] = []
     missing: list[int] = []
     for address in addresses:
-        cached = checkpoint.load(address) if checkpoint is not None else None
-        if cached is None:
+        if checkpoint is not None and checkpoint.is_completed(address):
+            completed.append(address)
+        else:
             missing.append(address)
             routine = analysis.routines[address]
-            progress.file_log(f"export {routine.name} 0x{address:x}")
-        else:
-            output[address] = cached
-            routine = analysis.routines[address]
-            progress.file_log(f"export {routine.name} 0x{address:x} cached")
+            progress.file_log(_render_log_prefix(routine))
     pending = set(missing)
     with progress.bar(total=len(addresses), desc="exporting", unit="func") as bar:
-        for _address in output:
+        for _address in completed:
             bar.update(1)
         try:
             ctx = multiprocessing.get_context("spawn")
-            with ProcessPoolExecutor(
+            executor = ProcessPoolExecutor(
                 max_workers=worker_count,
                 mp_context=ctx,
                 initializer=_init_worker,
                 initargs=(spec, analysis, names),
-            ) as executor:
-                futures = {
-                    executor.submit(_render_in_worker, address): address
-                    for address in missing
-                }
-                for future in as_completed(futures):
-                    address = futures[future]
-                    result_address, result = future.result()
-                    output[result_address] = result
-                    pending.discard(address)
-                    record_render_result(
-                        result,
-                        analysis,
+            )
+            try:
+                if _function_timeout_seconds() > 0:
+                    executor = _render_missing_with_timeout(
+                        executor=executor,
+                        worker_count=worker_count,
+                        spec=spec,
+                        analysis=analysis,
+                        names=names,
+                        addresses=missing,
+                        rendered=output,
                         checkpoint=checkpoint,
                         progress=progress,
+                        bar=bar,
                     )
-                    bar.update(1)
+                    pending.clear()
+                else:
+                    futures = {
+                        executor.submit(_render_in_worker, address): address
+                        for address in missing
+                    }
+                    for future in as_completed(futures):
+                        address = futures[future]
+                        result_address, result = future.result()
+                        output[result_address] = result
+                        pending.discard(address)
+                        record_render_result(
+                            result,
+                            analysis,
+                            checkpoint=checkpoint,
+                            progress=progress,
+                        )
+                        bar.update(1)
+            finally:
+                executor.shutdown(wait=True, cancel_futures=True)
         except BrokenProcessPool as exc:
             progress.log(
                 f"Warning: worker process exited unexpectedly ({exc}); retrying remaining functions"
@@ -1461,6 +1944,19 @@ def _render_parallel(
                 progress=progress,
             )
             bar.update(1)
+        if checkpoint is not None:
+            for address in completed:
+                cached = checkpoint.load(address)
+                if cached is not None:
+                    output[address] = cached
+                    continue
+                output[address] = _render_isolated(spec, analysis, address, names)
+                record_render_result(
+                    output[address],
+                    analysis,
+                    checkpoint=checkpoint,
+                    progress=progress,
+                )
     return output
 
 
@@ -1604,7 +2100,9 @@ def _render_in_worker(address: int) -> tuple[int, RenderedFunction]:
     if _WORKER_SESSION is None or _WORKER_ANALYSIS is None or _WORKER_NAMES is None:
         raise RuntimeError("render worker was not initialized")
     routine = _WORKER_ANALYSIS.routines[address]
-    result = render_one(_WORKER_SESSION, _WORKER_ANALYSIS, routine, _WORKER_NAMES)
+    result = render_one_with_limits(
+        _WORKER_SESSION, _WORKER_ANALYSIS, routine, _WORKER_NAMES
+    )
     release_memory = getattr(_WORKER_SESSION, "release_render_memory", None)
     if callable(release_memory):
         release_memory()
@@ -1672,6 +2170,28 @@ def render_one(
     )
 
 
+def render_one_with_limits(
+    session_like, analysis: ProgramAnalysis, routine: Routine, names: NameBook
+) -> RenderedFunction:
+    max_bytes = _max_function_bytes()
+    if max_bytes > 0 and routine.size > max_bytes:
+        prototype = fallback_prototype(routine, analysis.binary.pointer_size, names)
+        return RenderedFunction(
+            address=routine.address,
+            c_name=extract_name(prototype) or clean_c_identifier(routine.name),
+            prototype=prototype,
+            c_text=oversized_stub(routine, prototype, max_bytes),
+            asm_text=asm_function(routine, ""),
+            summary_text="",
+            failure=FunctionFailure(
+                routine.address,
+                routine.name,
+                f"function is too large to export ({routine.size} bytes > {max_bytes})",
+            ),
+        )
+    return render_one(session_like, analysis, routine, names)
+
+
 def _failure_stub(
     analysis: ProgramAnalysis,
     address: int,
@@ -1688,6 +2208,26 @@ def _failure_stub(
         asm_text=asm_function(routine, ""),
         summary_text="",
         failure=FunctionFailure(address, routine.name, str(exc)),
+    )
+
+
+def _timeout_stub(
+    analysis: ProgramAnalysis,
+    address: int,
+    names: NameBook,
+    timeout_seconds: int,
+) -> RenderedFunction:
+    routine = analysis.routines[address]
+    prototype = fallback_prototype(routine, analysis.binary.pointer_size, names)
+    message = f"decompiler timed out after {timeout_seconds}s"
+    return RenderedFunction(
+        address=address,
+        c_name=extract_name(prototype) or clean_c_identifier(routine.name),
+        prototype=prototype,
+        c_text=timeout_failure_stub(routine, prototype, timeout_seconds),
+        asm_text=asm_function(routine, ""),
+        summary_text="",
+        failure=FunctionFailure(address, routine.name, message),
     )
 
 
@@ -1776,6 +2316,30 @@ def failure_stub(routine: Routine, prototype: str) -> str:
         prototype,
         "{",
         f"    /* export failed for {routine.name} @ 0x{routine.address:x}; see export-manifest.json. */",
+    ]
+    if not prototype.startswith("void "):
+        lines.append("    return 0;")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def oversized_stub(routine: Routine, prototype: str, max_bytes: int) -> str:
+    lines = [
+        prototype,
+        "{",
+        f"    // too big to export: {routine.name} @ 0x{routine.address:x}; size={routine.size} bytes; limit={max_bytes} bytes.",
+    ]
+    if not prototype.startswith("void "):
+        lines.append("    return 0;")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def timeout_failure_stub(routine: Routine, prototype: str, timeout_seconds: int) -> str:
+    lines = [
+        prototype,
+        "{",
+        f"    /* export skipped for {routine.name} @ 0x{routine.address:x}; decompiler timed out after {timeout_seconds}s. */",
     ]
     if not prototype.startswith("void "):
         lines.append("    return 0;")
