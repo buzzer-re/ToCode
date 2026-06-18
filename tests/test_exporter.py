@@ -79,7 +79,10 @@ class CountingAnalyzer(FakeAnalyzer):
 
     def decompile(self, address: int) -> str:
         self.decompile_calls += 1
-        if self.interrupt_after is not None and self.decompile_calls > self.interrupt_after:
+        if (
+            self.interrupt_after is not None
+            and self.decompile_calls > self.interrupt_after
+        ):
             raise KeyboardInterrupt
         return super().decompile(address)
 
@@ -286,9 +289,7 @@ def test_export_binary_resumes_from_checkpoint_after_interrupt(tmp_path: Path) -
 def test_export_binary_restart_ignores_checkpoint(tmp_path: Path) -> None:
     binary = tmp_path / "sample.bin"
     binary.write_bytes(b"\x7fELF" + b"\x00" * 256)
-    routine = Routine(
-        0x1000, "main", 48, "int main(void)", None, False, 0, 0, 0, 0, 0
-    )
+    routine = Routine(0x1000, "main", 48, "int main(void)", None, False, 0, 0, 0, 0, 0)
     analysis = ProgramAnalysis(
         binary=BinaryFacts(
             path=binary,

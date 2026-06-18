@@ -117,7 +117,9 @@ class CheckpointStore:
         if existing is not None and existing.get("cache_id") != self.cache_id:
             shutil.rmtree(self.state_dir)
             existing = None
-            self.progress.log("Checkpoint: existing state does not match this export; starting fresh")
+            self.progress.log(
+                "Checkpoint: existing state does not match this export; starting fresh"
+            )
         self.rendered_dir.mkdir(parents=True, exist_ok=True)
         completed = self.completed_addresses()
         status = "resuming" if existing is not None and completed else "started"
@@ -358,7 +360,9 @@ def export_binary(
     except Exception:
         if context.checkpoint is not None:
             context.checkpoint.mark_failed()
-        context.progress.log("Export failed; rerun the same command to resume after fixing the issue.")
+        context.progress.log(
+            "Export failed; rerun the same command to resume after fixing the issue."
+        )
         raise
     if context.checkpoint is not None:
         context.checkpoint.complete()
@@ -834,7 +838,9 @@ def render_and_write_source_tree_parallel(
                 rendered: dict[int, RenderedFunction] = {}
                 missing: list[int] = []
                 for address in cluster.members:
-                    cached = checkpoint.load(address) if checkpoint is not None else None
+                    cached = (
+                        checkpoint.load(address) if checkpoint is not None else None
+                    )
                     if cached is None:
                         missing.append(address)
                         if progress is not None:
