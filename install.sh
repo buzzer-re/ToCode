@@ -28,7 +28,7 @@ Options:
   --repo URL       Git repository URL. Default: https://github.com/buzzer-re/ToCode.git
   --branch NAME    Branch to install. Default: main
   --dev            Also install development extras in the local checkout
-  --full           Install all decompiler backends, including the angr fallback
+  --full, --all    Install all decompiler backends, including the angr fallback
   -h, --help       Show this help
 EOF
 }
@@ -56,6 +56,53 @@ find_python() {
     return 0
   fi
   return 1
+}
+
+ensure_pip() {
+  python_bin="$1"
+  if "$python_bin" -m pip --version >/dev/null 2>&1; then
+    return 0
+  fi
+
+  info "Python pip was not found; attempting to bootstrap it"
+  "$python_bin" -m ensurepip --upgrade --user >/dev/null 2>&1 || true
+  if "$python_bin" -m pip --version >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command -v apt-get >/dev/null 2>&1; then
+    info "Installing python3-pip with apt"
+    sudo apt-get update
+    sudo apt-get install -y python3-pip
+  elif command -v brew >/dev/null 2>&1; then
+    info "Installing Python packaging tools with Homebrew"
+    brew install python
+  fi
+
+  "$python_bin" -m pip --version >/dev/null 2>&1 \
+    || die "Python pip could not be installed automatically" \
+      "Install uv from https://docs.astral.sh/uv/getting-started/installation/ (recommended)," \
+      "or install python3-pip with your package manager, then run this installer again."
+}
+
+pip_install_user() {
+  python_bin="$1"
+  requirement="$2"
+  info "Installing the tocode command with pip for the current user"
+  if "$python_bin" -m pip install --user --editable "$requirement"; then
+    return 0
+  fi
+
+  info "Retrying pip install with --break-system-packages for this user install"
+  "$python_bin" -m pip install --user --break-system-packages --editable "$requirement" \
+    || die "pip could not install ToCode" \
+      "Check the pip output above, or install uv and run this installer again."
+}
+
+python_user_bin_dir() {
+  python_bin="$1"
+  "$python_bin" -c 'import site; print(site.getuserbase() + "/bin")' 2>/dev/null \
+    || printf '%s\n' "$HOME/.local/bin"
 }
 
 path_contains() {
@@ -126,7 +173,7 @@ while [ "$#" -gt 0 ]; do
       with_dev=true
       shift
       ;;
-    --full)
+    --full|--all)
       with_full=true
       shift
       ;;
@@ -203,31 +250,14 @@ else
       "Install uv from https://docs.astral.sh/uv/getting-started/installation/ (recommended)," \
       "or install Python 3.10 or newer, then run this installer again."
 
-  # Install into a dedicated virtual environment rather than the system
-  # interpreter. Modern distros (and Homebrew) mark their Python as
-  # "externally managed" (PEP 668), so even `pip install --user` is refused;
-  # a venv sidesteps that and keeps ToCode's dependencies isolated.
-  venv_dir="$install_dir/.venv"
-  info "Creating an isolated environment at $venv_dir"
-  "$python_bin" -m venv "$venv_dir" \
-    || die "could not create a virtual environment at $venv_dir" \
-      "Install uv from https://docs.astral.sh/uv/getting-started/installation/ (recommended)," \
-      "or install the venv module (for example: apt install python3-venv), then run this installer again."
-
-  venv_python="$venv_dir/bin/python"
-
-  info "Installing the tocode command with pip"
+  ensure_pip "$python_bin"
   if [ -n "$pip_extras" ]; then
-    "$venv_python" -m pip install --editable "${install_dir}[$pip_extras]"
+    pip_install_user "$python_bin" "${install_dir}[$pip_extras]"
   else
-    "$venv_python" -m pip install --editable "$install_dir"
+    pip_install_user "$python_bin" "$install_dir"
   fi
 
-  # Expose only the tocode launcher on PATH; putting the whole venv bin on
-  # PATH would shadow the system python/pip.
-  tocode_bin_dir="$HOME/.local/bin"
-  mkdir -p "$tocode_bin_dir"
-  ln -sf "$venv_dir/bin/tocode" "$tocode_bin_dir/tocode"
+  tocode_bin_dir="$(python_user_bin_dir "$python_bin")"
   ensure_path "$tocode_bin_dir"
 fi
 

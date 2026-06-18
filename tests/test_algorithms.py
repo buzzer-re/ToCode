@@ -1,7 +1,9 @@
+import logging
 from pathlib import Path
 
 import pytest
 
+from tocode.backends.angr import _quiet_angr_logs
 from tocode.backends.base import choose_backend, discover_idadir
 from tocode.backends.r2 import R2Session
 from tocode.cluster import cluster_routines
@@ -172,6 +174,20 @@ def test_requested_jobs_are_limited_by_function_count() -> None:
 def test_name_sanitizers_are_c_and_path_safe() -> None:
     assert clean_c_identifier("123 bad-name") == "fn_123_bad_name"
     assert clean_path_component("../bad name!") == "bad_name"
+
+
+def test_quiet_angr_logs_suppresses_recoverable_backend_noise(caplog) -> None:
+    logger = logging.getLogger("angr.analyses.decompiler")
+    previous = logging.root.manager.disable
+
+    with _quiet_angr_logs():
+        logger.error("recoverable angr traceback")
+
+    logger.error("visible after guard")
+
+    assert logging.root.manager.disable == previous
+    assert "recoverable angr traceback" not in caplog.text
+    assert "visible after guard" in caplog.text
 
 
 def test_discover_idadir_checks_windows_program_files(tmp_path, monkeypatch) -> None:

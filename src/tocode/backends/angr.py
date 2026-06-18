@@ -1,16 +1,32 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+
+@contextmanager
+def _quiet_angr_logs() -> Iterator[None]:
+    """Suppress expected angr diagnostics while preserving ToCode output."""
+    previous = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        yield
+    finally:
+        logging.disable(previous)
+
 
 try:
-    import angr  # type: ignore[import-untyped]
-    import angr.analyses.decompiler  # noqa: F401  # register the Decompiler analysis
+    with _quiet_angr_logs():
+        import angr  # type: ignore[import-untyped]
+        import angr.analyses.decompiler  # noqa: F401  # register the Decompiler analysis
 except ImportError:  # pragma: no cover - optional backend
     angr = None  # type: ignore[assignment]
 
 try:  # XRef typing lives in different places across angr versions
-    from angr.knowledge_plugins.xrefs import XRefType as _xref_type_cls
+    with _quiet_angr_logs():
+        from angr.knowledge_plugins.xrefs import XRefType as _xref_type_cls
 except Exception:  # noqa: BLE001  # pragma: no cover
     _xref_type_cls = None  # type: ignore[assignment,misc]
 
@@ -59,11 +75,12 @@ class AngrSession:
         if angr is None:
             raise BackendError("python package angr is not installed")
         try:
-            self.project: Any = angr.Project(
-                str(self.binary),
-                auto_load_libs=False,
-                load_options={"perform_relocations": True},
-            )
+            with _quiet_angr_logs():
+                self.project: Any = angr.Project(
+                    str(self.binary),
+                    auto_load_libs=False,
+                    load_options={"perform_relocations": True},
+                )
         except Exception as exc:  # noqa: BLE001
             raise BackendError(f"angr failed to load {self.binary}: {exc}") from exc
         self._cfg: Any = None
@@ -75,18 +92,20 @@ class AngrSession:
 
     def analyze(self) -> None:
         try:
-            self._cfg = self.project.analyses.CFGFast(
-                normalize=True, cross_references=True
-            )
+            with _quiet_angr_logs():
+                self._cfg = self.project.analyses.CFGFast(
+                    normalize=True, cross_references=True
+                )
         except Exception as exc:  # noqa: BLE001
             raise BackendError(f"angr CFG construction failed: {exc}") from exc
         # Recover prototypes/arguments/variables so functions() and the
         # decompiler have signatures and locals to work with. Best-effort:
         # a failure here only degrades quality, not structure.
         try:
-            self.project.analyses.CompleteCallingConventions(
-                recover_variables=True, cfg=self._cfg.model
-            )
+            with _quiet_angr_logs():
+                self.project.analyses.CompleteCallingConventions(
+                    recover_variables=True, cfg=self._cfg.model
+                )
         except Exception:  # noqa: BLE001
             pass
         self._funcs = {
@@ -513,7 +532,8 @@ class AngrSession:
         if func is None:
             return f"{prototype}\n{{\n    /* angr: unknown function */\n}}\n"
         try:
-            dec = self.project.analyses.Decompiler(func, cfg=self._cfg.model)
+            with _quiet_angr_logs():
+                dec = self.project.analyses.Decompiler(func, cfg=self._cfg.model)
             text = getattr(getattr(dec, "codegen", None), "text", None)
         except Exception:  # noqa: BLE001
             text = None
