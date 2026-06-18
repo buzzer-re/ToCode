@@ -447,6 +447,16 @@ def create_analyzer(
             session=IdaSession(binary, idadir=idadir, ida_domain_path=ida_domain_path),
             progress=progress,
         )
+    if choice.selected == "angr":
+        # Imported lazily: pulling in angr is slow and noisy (it loads native
+        # extensions at import time), so only do it when angr is the backend.
+        from .backends.angr import AngrSession
+
+        return BinaryAnalyzer(
+            binary,
+            session=AngrSession(binary),
+            progress=progress,
+        )
     return BinaryAnalyzer(
         binary,
         session=R2Session(binary, analysis_command=analysis_command),

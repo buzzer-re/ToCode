@@ -53,7 +53,21 @@ sample_decompiler/
 
 ### Supported backends
 
-Currently, IDA (using the ida-domain/idapro Python libraries) and radare2 are supported. Other disassemblers may be added in the future.
+Three backends are supported, selected with `--backend` (default `auto`, which prefers them in this order):
+
+1. **IDA** – uses the ida-domain/idapro Python libraries (best decompilation quality).
+2. **radare2** – uses r2pipe with the r2ghidra decompiler.
+3. **angr** – a pure-Python fallback with no external tooling, so ToCode still runs when neither IDA nor radare2 is available. It is an optional extra (it is large: ~450 MB of native dependencies), so it is not installed by default. Get it in any of these ways:
+
+   ```bash
+   bash ./install.sh --all                        # recommended: installs every backend
+   pip install tocode-cli[angr]                   # or, with pip directly
+   uv tool install --force --editable '.[angr]'   # or, from a local checkout
+   ```
+
+   The angr export is structurally identical to the others (same files and metadata); its pseudo-C is lower quality than Hex-Rays or r2ghidra.
+
+Other disassemblers may be added in the future.
 
 ### Using
 
@@ -69,6 +83,12 @@ On Linux or macOS:
 
 ```bash
 bash ./install.sh
+```
+
+Add `--all` or `--full` (PowerShell: `-Full`) to also install the angr fallback backend, so ToCode works out-of-the-box even without IDA or radare2:
+
+```bash
+bash ./install.sh --all
 ```
 
 Manual setup (requires [uv](https://docs.astral.sh/uv/)):

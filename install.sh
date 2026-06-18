@@ -4,6 +4,7 @@ set -euo pipefail
 repo_url="${TOCODE_REPO_URL:-https://github.com/buzzer-re/ToCode.git}"
 branch="${TOCODE_BRANCH:-main}"
 with_dev=false
+with_full=false
 tocode_bin_dir=""
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
@@ -27,6 +28,7 @@ Options:
   --repo URL       Git repository URL. Default: https://github.com/buzzer-re/ToCode.git
   --branch NAME    Branch to install. Default: main
   --dev            Also install development extras in the local checkout
+  --full, --all    Install all decompiler backends, including the angr fallback
   -h, --help       Show this help
 EOF
 }
@@ -54,6 +56,53 @@ find_python() {
     return 0
   fi
   return 1
+}
+
+ensure_pip() {
+  python_bin="$1"
+  if "$python_bin" -m pip --version >/dev/null 2>&1; then
+    return 0
+  fi
+
+  info "Python pip was not found; attempting to bootstrap it"
+  "$python_bin" -m ensurepip --upgrade --user >/dev/null 2>&1 || true
+  if "$python_bin" -m pip --version >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command -v apt-get >/dev/null 2>&1; then
+    info "Installing python3-pip with apt"
+    sudo apt-get update
+    sudo apt-get install -y python3-pip
+  elif command -v brew >/dev/null 2>&1; then
+    info "Installing Python packaging tools with Homebrew"
+    brew install python
+  fi
+
+  "$python_bin" -m pip --version >/dev/null 2>&1 \
+    || die "Python pip could not be installed automatically" \
+      "Install uv from https://docs.astral.sh/uv/getting-started/installation/ (recommended)," \
+      "or install python3-pip with your package manager, then run this installer again."
+}
+
+pip_install_user() {
+  python_bin="$1"
+  requirement="$2"
+  info "Installing the tocode command with pip for the current user"
+  if "$python_bin" -m pip install --user --editable "$requirement"; then
+    return 0
+  fi
+
+  info "Retrying pip install with --break-system-packages for this user install"
+  "$python_bin" -m pip install --user --break-system-packages --editable "$requirement" \
+    || die "pip could not install ToCode" \
+      "Check the pip output above, or install uv and run this installer again."
+}
+
+python_user_bin_dir() {
+  python_bin="$1"
+  "$python_bin" -c 'import site; print(site.getuserbase() + "/bin")' 2>/dev/null \
+    || printf '%s\n' "$HOME/.local/bin"
 }
 
 path_contains() {
@@ -124,6 +173,10 @@ while [ "$#" -gt 0 ]; do
       with_dev=true
       shift
       ;;
+    --full|--all)
+      with_full=true
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -154,16 +207,33 @@ else
   git clone --branch "$branch" "$repo_url" "$install_dir"
 fi
 
+# Build the list of optional dependency groups to install. "dev" pulls in the
+# test tooling; "full"/angr installs the pure-Python fallback backend.
+#
+# uv sync populates the project's .venv (used by `uv run` / development), while
+# uv tool install builds a separate isolated environment for the `tocode`
+# command. Runtime extras (angr) must be passed to BOTH or the installed
+# command will not see them. dev is build/test tooling, so it only belongs in
+# the project venv, not the tool environment.
+uv_extras=""
+pip_extras=""
+tool_extras=""
+if [ "$with_dev" = true ]; then
+  uv_extras="$uv_extras --extra dev"
+  pip_extras="dev"
+fi
+if [ "$with_full" = true ]; then
+  uv_extras="$uv_extras --extra angr"
+  pip_extras="${pip_extras:+$pip_extras,}angr"
+  tool_extras="angr"
+fi
+
 if command -v uv >/dev/null 2>&1; then
   info "Syncing local project environment with uv"
-  if [ "$with_dev" = true ]; then
-    uv --directory "$install_dir" sync --locked --extra dev
-  else
-    uv --directory "$install_dir" sync --locked
-  fi
+  uv --directory "$install_dir" sync --locked $uv_extras
 
   info "Installing the tocode command with uv"
-  uv tool install --force --editable "$install_dir"
+  uv tool install --force --editable "${install_dir}${tool_extras:+[$tool_extras]}"
 
   tocode_bin_dir="$(uv tool dir --bin 2>/dev/null || true)"
   if ! command -v tocode >/dev/null 2>&1; then
@@ -180,15 +250,14 @@ else
       "Install uv from https://docs.astral.sh/uv/getting-started/installation/ (recommended)," \
       "or install Python 3.10 or newer, then run this installer again."
 
-  info "Installing the tocode command with pip"
-  if [ "$with_dev" = true ]; then
-    "$python_bin" -m pip install --user --editable "${install_dir}[dev]"
+  ensure_pip "$python_bin"
+  if [ -n "$pip_extras" ]; then
+    pip_install_user "$python_bin" "${install_dir}[$pip_extras]"
   else
-    "$python_bin" -m pip install --user --editable "$install_dir"
+    pip_install_user "$python_bin" "$install_dir"
   fi
 
-  tocode_bin_dir="$("$python_bin" -c 'import sysconfig; print(sysconfig.get_path("scripts", sysconfig.get_preferred_scheme("user")))' 2>/dev/null \
-    || "$python_bin" -c 'import os, site; print(os.path.join(site.USER_BASE, "bin"))')"
+  tocode_bin_dir="$(python_user_bin_dir "$python_bin")"
   ensure_path "$tocode_bin_dir"
 fi
 

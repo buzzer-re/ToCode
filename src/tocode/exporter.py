@@ -1169,6 +1169,13 @@ def _open_worker(spec: WorkerSpec):
             spec.binary, analysis_command=spec.analysis_command or "aaa"
         )
         session.analyze()
+    elif spec.backend == "angr":
+        # Imported lazily so non-angr exports never pay angr's slow, noisy
+        # native-extension import at startup.
+        from .backends.angr import AngrSession
+
+        session = AngrSession(spec.binary)
+        session.analyze()
     else:
         raise RuntimeError(f"unsupported backend for worker: {spec.backend}")
     session.ensure_decompiler()
