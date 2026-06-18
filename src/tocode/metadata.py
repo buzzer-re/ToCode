@@ -5,6 +5,7 @@ from collections import Counter, deque
 import math
 from pathlib import Path
 import re
+import tempfile
 from typing import Callable
 
 from .naming import SHARED_CLUSTER_ID, c_file_name, clean_path_component
@@ -723,6 +724,19 @@ def cluster_id(cluster: Cluster) -> str:
 def write_json(path: Path, payload: dict[str, object]) -> None:
     import json
 
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8"
-    )
+    write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=False) + "\n")
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        tmp_path = Path(handle.name)
+        handle.write(text)
+    tmp_path.replace(path)
