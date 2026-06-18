@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from tocode.exporter import (
     _counts_from_summary,
     _worker_spec,
@@ -62,6 +64,27 @@ class FakeAnalyzer:
 
     def prepare_parallel_workers(self) -> None:
         return
+
+
+class CountingAnalyzer(FakeAnalyzer):
+    def __init__(
+        self,
+        analysis: ProgramAnalysis,
+        *,
+        interrupt_after: int | None = None,
+    ) -> None:
+        super().__init__(analysis)
+        self.decompile_calls = 0
+        self.interrupt_after = interrupt_after
+
+    def decompile(self, address: int) -> str:
+        self.decompile_calls += 1
+        if (
+            self.interrupt_after is not None
+            and self.decompile_calls > self.interrupt_after
+        ):
+            raise KeyboardInterrupt
+        return super().decompile(address)
 
 
 class FakeSession:
@@ -192,6 +215,126 @@ def test_export_binary_writes_source_tree_and_metadata(tmp_path: Path) -> None:
     assert "embedded_pe" not in triage
     assert "embedded_shellcode_hint" not in triage
     assert "evasion" not in triage
+    assert (summary.root_dir / "tocode.log").is_file()
+    assert "Export run started" in (summary.root_dir / "tocode.log").read_text(
+        encoding="utf-8"
+    )
+    assert not (summary.root_dir / ".tocode").exists()
+
+
+def test_export_binary_resumes_from_checkpoint_after_interrupt(tmp_path: Path) -> None:
+    binary = tmp_path / "sample.bin"
+    binary.write_bytes(b"\x7fELF" + b"\x00" * 256)
+    analysis = ProgramAnalysis(
+        binary=BinaryFacts(
+            path=binary,
+            arch="x86",
+            bits=64,
+            image_base=0x1000,
+            os_name="linux",
+            format_name="elf",
+            file_type="EXEC",
+            entrypoints=[0x1000],
+        ),
+        segments=[Segment(".text", 128, 128, "PROGBITS", "r-x", 0, 0x1000)],
+        routines={
+            0x1000: Routine(
+                0x1000, "main", 48, "int main(void)", None, False, 0, 0, 0, 1, 0
+            ),
+            0x1050: Routine(
+                0x1050, "helper", 32, "int helper(void)", None, False, 0, 0, 0, 0, 1
+            ),
+        },
+        imports={},
+        exports=[],
+        symbols=[],
+        relocations=[],
+        strings=[],
+        flags=[],
+        callees={0x1000: [0x1050], 0x1050: []},
+        callers={0x1000: [], 0x1050: [0x1000]},
+        import_calls={0x1000: [], 0x1050: []},
+        roots=[0x1000],
+        thunks=set(),
+    )
+    export_root = tmp_path / "export"
+
+    with pytest.raises(KeyboardInterrupt):
+        export_binary(
+            CountingAnalyzer(analysis, interrupt_after=1),  # type: ignore[arg-type]
+            out_dir=export_root,
+            progress=Progress(enabled=False),
+        )
+
+    assert (export_root / ".tocode" / "checkpoint.json").is_file()
+    log_text = (export_root / "tocode.log").read_text(encoding="utf-8")
+    assert "Export interrupted" in log_text
+    assert "export main 0x1000 done" in log_text
+
+    resumed = CountingAnalyzer(analysis)
+    summary = export_binary(
+        resumed,  # type: ignore[arg-type]
+        out_dir=export_root,
+        progress=Progress(enabled=False),
+    )
+
+    assert resumed.decompile_calls == 1
+    assert summary.function_count == 2
+    assert not (export_root / ".tocode").exists()
+    resumed_log = (export_root / "tocode.log").read_text(encoding="utf-8")
+    assert "export main 0x1000 cached" in resumed_log
+    assert "export helper 0x1050 done" in resumed_log
+
+
+def test_export_binary_restart_ignores_checkpoint(tmp_path: Path) -> None:
+    binary = tmp_path / "sample.bin"
+    binary.write_bytes(b"\x7fELF" + b"\x00" * 256)
+    routine = Routine(0x1000, "main", 48, "int main(void)", None, False, 0, 0, 0, 0, 0)
+    analysis = ProgramAnalysis(
+        binary=BinaryFacts(
+            path=binary,
+            arch="x86",
+            bits=64,
+            image_base=0x1000,
+            os_name="linux",
+            format_name="elf",
+            file_type="EXEC",
+            entrypoints=[0x1000],
+        ),
+        segments=[Segment(".text", 128, 128, "PROGBITS", "r-x", 0, 0x1000)],
+        routines={routine.address: routine},
+        imports={},
+        exports=[],
+        symbols=[],
+        relocations=[],
+        strings=[],
+        flags=[],
+        callees={routine.address: []},
+        callers={routine.address: []},
+        import_calls={routine.address: []},
+        roots=[routine.address],
+        thunks=set(),
+    )
+    export_root = tmp_path / "export"
+
+    with pytest.raises(KeyboardInterrupt):
+        export_binary(
+            CountingAnalyzer(analysis, interrupt_after=0),  # type: ignore[arg-type]
+            out_dir=export_root,
+            progress=Progress(enabled=False),
+        )
+
+    restarted = CountingAnalyzer(analysis)
+    export_binary(
+        restarted,  # type: ignore[arg-type]
+        out_dir=export_root,
+        progress=Progress(enabled=False),
+        restart=True,
+    )
+
+    assert restarted.decompile_calls == 1
+    log_text = (export_root / "tocode.log").read_text(encoding="utf-8")
+    assert "Checkpoint: discarded previous state (--restart)" in log_text
 
 
 def test_export_binary_publishes_ida_database(tmp_path: Path) -> None:

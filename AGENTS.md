@@ -45,6 +45,7 @@ The CLI accepts a regular binary file or IDA database and writes a project direc
 - `triage.json`
 - `project.json`
 - `export-manifest.json`
+- `tocode.log`
 - generated export `AGENTS.md`
 - generated export `CLAUDE.md`
 

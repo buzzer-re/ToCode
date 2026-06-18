@@ -9,6 +9,7 @@ from pathlib import Path
 from .analysis import create_analyzer
 from .errors import ToCodeError
 from .exporter import export_binary
+from .naming import default_output_name
 from .progress import Progress
 
 
@@ -85,6 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compute per-section Shannon entropy (off by default; slow on large binaries).",
     )
     parser.add_argument(
+        "--restart",
+        action="store_true",
+        help="Ignore any saved checkpoint for this output directory and start over.",
+    )
+    parser.add_argument(
         "-q",
         "--quiet",
         action="store_true",
@@ -103,12 +109,26 @@ def main(argv: list[str] | None = None) -> int:
     args.out_dir = (
         args.out_dir.expanduser().resolve() if args.out_dir is not None else None
     )
+    log_root = (
+        args.out_dir
+        if args.out_dir is not None
+        else binary.parent / default_output_name(binary)
+    )
+    progress.set_log_path(log_root / "tocode.log")
+    progress.log(
+        f"Command: {' '.join(sys.argv if argv is None else ['tocode', *argv])}"
+    )
     started = time.monotonic()
     try:
         if not binary.is_file():
             parser.error(f"input must be a regular file: {binary}")
         summary = _run_one(binary, args=args, progress=progress, out_dir=args.out_dir)
+    except KeyboardInterrupt:
+        progress.log("tocode: interrupted; progress saved if checkpointing had started")
+        print("tocode: interrupted; rerun the same command to resume", file=sys.stderr)
+        return 130
     except ToCodeError as exc:
+        progress.log(f"tocode: {exc}")
         print(f"tocode: {exc}", file=sys.stderr)
         return 1
     if not args.quiet:
@@ -146,4 +166,5 @@ def _run_one(
             jobs=args.jobs,
             tree=args.tree,
             entropy=args.entropy,
+            restart=args.restart,
         )
