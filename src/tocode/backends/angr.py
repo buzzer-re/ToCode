@@ -5,6 +5,9 @@ import logging
 from pathlib import Path
 from typing import Any, Iterator
 
+from .base import BackendName
+from ..errors import BackendError
+
 
 @contextmanager
 def _quiet_angr_logs() -> Iterator[None]:
@@ -29,9 +32,6 @@ try:  # XRef typing lives in different places across angr versions
         from angr.knowledge_plugins.xrefs import XRefType as _xref_type_cls
 except Exception:  # noqa: BLE001  # pragma: no cover
     _xref_type_cls = None  # type: ignore[assignment,misc]
-
-from .base import BackendName
-from ..errors import BackendError
 
 # Keep XRefType defined (as Any) whether or not the optional import succeeded.
 XRefType: Any = _xref_type_cls
