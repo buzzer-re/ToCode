@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import Counter
 import hashlib
 import os
 from pathlib import Path
@@ -514,11 +513,6 @@ class IdaSession:
         ) or self._db.functions.get_name(func)
         callers = self._db.functions.get_callers(func)
         callees = self._db.functions.get_callees(func)
-        locals_count = Counter(
-            "args" if bool(getattr(item, "is_argument", False)) else "locals"
-            for item in self._locals(address)
-            if not bool(getattr(item, "is_result", False))
-        )
         callee_names = [
             self._db.functions.get_name(resolved) or f"sub_{resolved.start_ea:x}"
             for resolved in (self._resolve_thunk(item) for item in callees[:8])
@@ -530,8 +524,6 @@ class IdaSession:
             f"returns: {'no' if not self._db.functions.does_return(func) else 'yes'}",
             f"callers: {len(callers)}",
             f"callees: {len(callees)}",
-            f"args: {locals_count['args']}",
-            f"locals: {locals_count['locals']}",
         ]
         if callee_names:
             lines.append(f"callee_names: {', '.join(callee_names)}")
