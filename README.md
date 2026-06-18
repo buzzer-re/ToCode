@@ -39,6 +39,7 @@ sample_decompiler/
   triage.json
   project.json
   export-manifest.json
+  tocode.log
 ```
 
 | Path | Description |
@@ -47,6 +48,7 @@ sample_decompiler/
 | `include` | Generated headers for the exported project. |
 | `data` | Raw section dumps and variable metadata. |
 | `*.json` | Functions, sections, strings, imports, exports, relocations, reachability, clusters, triage, project metadata, and export manifest. |
+| `tocode.log` | Export log with checkpoint, resume, and per-function render history. |
 | `AGENTS.md` / `CLAUDE.md` | Instructions for agents analyzing the exported binary. |
 | `src/tree` | Optional scanner-friendly C output when `--tree` is used. |
 
@@ -112,6 +114,8 @@ codex
 
 #### From an ongoing RE work
 ```
+
+Interrupted exports save progress automatically. Rerun the same command to resume from cached function renders, or add `--restart` to ignore the saved checkpoint and start over.
 tocode firmwareX.bin.i64 -o firmwareX_decompiled/
 ...
 ```
