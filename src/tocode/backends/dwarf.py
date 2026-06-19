@@ -85,7 +85,9 @@ class _Extractor:
             try:
                 self._handle_cu(cu)
             except Exception:  # noqa: BLE001 - skip malformed CUs, keep the rest
-                continue
+                pass
+            finally:
+                _release_cu(cu)
         return DwarfData(self.sources, self.func_types, self.types)
 
     def _handle_cu(self, cu: Any) -> None:
@@ -282,6 +284,20 @@ class _Extractor:
         if tag == "DW_TAG_subroutine_type":
             return "void *"  # function pointer; keep it simple
         return name or "void"
+
+
+def _release_cu(cu: Any) -> None:
+    """Drop pyelftools' per-CU DIE cache so memory does not grow per unit.
+
+    pyelftools caches every DIE it parses on the CompileUnit; without this,
+    walking all units of a large .debug_info accumulates the whole tree in RAM
+    (gigabytes), which can OOM the process. We are done with the CU here.
+    """
+    try:
+        cu._dielist = []
+        cu._diemap = {}
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _ref(die: Any) -> Any:
