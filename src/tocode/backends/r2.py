@@ -121,6 +121,45 @@ class R2Session:
     def functions(self) -> list[dict[str, Any]]:
         return self.cmdj("aflj") or []
 
+    def types(self) -> list[dict[str, Any]]:
+        """Best-effort type catalog from radare2's type database.
+
+        radare2's DWARF/type support is limited and the JSON shapes vary across
+        versions, so this is defensive: any failure yields fewer rows, never an
+        error. radare2 exposes no reliable per-function source file/line, so
+        functions() leaves those fields unset.
+        """
+        rows: list[dict[str, Any]] = []
+        for command, kind in (("tsj", "struct"), ("tuj", "union"), ("tej", "enum")):
+            try:
+                entries = self.cmdj(command) or []
+            except (BackendError, BackendJsonError):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name") or entry.get("type")
+                if not name:
+                    continue
+                try:
+                    c_decl = self.cmd(f"tc {name}").strip()
+                except BackendError:
+                    c_decl = ""
+                if not c_decl:
+                    continue
+                members = entry.get("fields") or entry.get("members") or []
+                rows.append(
+                    {
+                        "name": str(name),
+                        "kind": kind,
+                        "size": entry.get("size"),
+                        "c_decl": c_decl,
+                        "members": members if isinstance(members, list) else [],
+                        "ordinal": None,
+                    }
+                )
+        return rows
+
     def disasm(self, address: int) -> str:
         if address not in self._pdf:
             self._pdf[address] = self.cmd(f"pdf @ 0x{address:x}")

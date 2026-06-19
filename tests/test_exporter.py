@@ -30,6 +30,7 @@ from tocode.schema import (
     Routine,
     Segment,
     StringEntry,
+    TypeDef,
 )
 
 
@@ -226,6 +227,91 @@ def test_export_binary_writes_source_tree_and_metadata(tmp_path: Path) -> None:
         encoding="utf-8"
     )
     assert not (summary.root_dir / ".tocode").exists()
+
+
+def test_export_groups_by_source_file_and_exports_types(tmp_path: Path) -> None:
+    binary = tmp_path / "sample.bin"
+    binary.write_bytes(b"\x7fELF" + b"\x00" * 256 + b"hello\x00")
+    main = Routine(0x1000, "main", 48, "int main(void)", None, False, 0, 0, 0, 1, 0)
+    main.source_file = "net/socket.c"
+    main.source_dir = "net"
+    main.source_line = 42
+    main.return_type = "int"
+    main.params = [("argc", "int")]
+    # A function without debug info must fall back to cluster-based layout.
+    helper = Routine(
+        0x1050, "helper", 32, "int helper(void)", None, False, 0, 0, 0, 0, 1
+    )
+    analysis = ProgramAnalysis(
+        binary=BinaryFacts(
+            path=binary,
+            arch="x86",
+            bits=64,
+            image_base=0x1000,
+            os_name="linux",
+            format_name="elf",
+            file_type="EXEC",
+            entrypoints=[0x1000],
+        ),
+        segments=[Segment(".text", 128, 128, "PROGBITS", "r-x", 0, 0x1000)],
+        routines={0x1000: main, 0x1050: helper},
+        imports={},
+        exports=[],
+        symbols=[],
+        relocations=[],
+        strings=[],
+        flags=[],
+        callees={0x1000: [], 0x1050: []},
+        callers={0x1000: [], 0x1050: []},
+        import_calls={0x1000: [], 0x1050: []},
+        roots=[0x1000],
+        thunks=set(),
+        types=[
+            TypeDef(
+                name="conn",
+                kind="struct",
+                size=8,
+                c_decl="struct conn {\n    int fd;\n};",
+                members=[{"name": "fd", "type": "int", "offset": 0}],
+            )
+        ],
+    )
+
+    summary = export_binary(
+        FakeAnalyzer(analysis),  # type: ignore[arg-type]
+        out_dir=tmp_path / "export",
+        progress=Progress(enabled=False),
+        jobs=None,
+        tree=False,
+    )
+    root = summary.root_dir
+
+    # DWARF-named function lands under its source directory/filename...
+    source_c = root / "src" / "raw" / "net" / "socket.c"
+    assert source_c.is_file()
+    assert "origin: net/socket.c:42" in source_c.read_text(encoding="utf-8")
+    # ...while the function without debug info keeps the cluster fallback.
+    assert (root / "src" / "raw" / "app" / "cluster_0000000000001050.c").is_file()
+
+    # Recovered types are exported as a catalog and a real C header.
+    types_doc = json.loads((root / "types.json").read_text(encoding="utf-8"))
+    assert types_doc["count"] == 1
+    assert types_doc["types"][0]["name"] == "conn"
+    types_header = root / "include" / "sample.types.h"
+    assert types_header.is_file()
+    assert "struct conn" in types_header.read_text(encoding="utf-8")
+    main_header = (root / "include" / "sample.h").read_text(encoding="utf-8")
+    assert '#include "sample.types.h"' in main_header
+
+    functions = json.loads((root / "functions.json").read_text(encoding="utf-8"))
+    by_name = {f["name"]: f for f in functions["functions"]}
+    assert by_name["main"]["decl_file"] == "net/socket.c"
+    assert by_name["main"]["decl_line"] == 42
+    assert by_name["main"]["return_type"] == "int"
+    assert by_name["main"]["params"] == [{"name": "argc", "type": "int"}]
+
+    manifest = json.loads((root / "export-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["type_count"] == 1
 
 
 def test_export_binary_resumes_from_checkpoint_after_interrupt(tmp_path: Path) -> None:

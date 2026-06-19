@@ -106,6 +106,41 @@ def test_render_and_callgraph_on_first_function(session: AngrSession) -> None:
     assert all(isinstance(n, str) for n in imported)
 
 
+def test_angr_uses_dwarf_for_source_and_types(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+
+    compiler = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
+    if compiler is None:
+        pytest.skip("no C compiler available")
+    src = tmp_path / "prog.c"
+    src.write_text(
+        "struct box { int w; int h; };\n"
+        "int area(struct box *b) { return b->w * b->h; }\n"
+        "int main(void) { struct box b = {3, 4}; return area(&b); }\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "prog"
+    result = subprocess.run(
+        [compiler, "-g", "-O0", "-o", str(out), str(src)], capture_output=True
+    )
+    if result.returncode != 0:
+        pytest.skip("compiler failed")
+
+    sess = AngrSession(out)
+    sess.analyze()
+    try:
+        rows = {r["name"]: r for r in sess.functions()}
+        assert "area" in rows
+        assert rows["area"].get("source_file", "").endswith("prog.c")
+        assert rows["area"].get("source_line")
+        assert rows["area"].get("return_type") == "int"
+        type_names = {t["name"] for t in sess.types()}
+        assert "box" in type_names
+    finally:
+        sess.close()
+
+
 def test_data_xrefs_returns_mapping(session: AngrSession) -> None:
     strings = session.strings()
     addresses = {row["vaddr"] for row in strings[:5]} or {session.project.entry}

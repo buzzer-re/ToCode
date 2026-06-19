@@ -36,6 +36,8 @@ def default_output_name(binary: Path) -> str:
 
 
 def c_file_name(cluster: Cluster) -> str:
+    if cluster.file_base:
+        return f"{clean_path_component(cluster.file_base)}.c"
     if cluster.root == SHARED_CLUSTER_ID:
         return "utils.c"
     return f"cluster_{cluster.root:016x}.c"

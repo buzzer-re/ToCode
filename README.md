@@ -24,11 +24,13 @@ sample_decompiler/
   src/raw/**/*.asm
   src/raw/**/*.summary
   include/*.h
+  include/*.types.h
   data/*.bin
   data/variables.json
   data/variables_interesting.json
   function-index.json
   functions.json
+  types.json
   sections.json
   strings.json
   imports.json
@@ -44,10 +46,11 @@ sample_decompiler/
 
 | Path | Description |
 | --- | --- |
-| `src/raw` | Decompiled C-like output, assembly, and summaries grouped by cluster. |
-| `include` | Generated headers for the exported project. |
+| `src/raw` | Decompiled C-like output, assembly, and summaries. Grouped by call-graph cluster, or by the original source file/directory when the binary has debug info (DWARF). |
+| `include` | Generated headers, including `*.types.h` with the structs/enums/typedefs recovered from the binary. |
 | `data` | Raw section dumps and variable metadata. |
-| `*.json` | Functions, sections, strings, imports, exports, relocations, reachability, clusters, triage, project metadata, and export manifest. |
+| `types.json` | Catalog of types recovered from the binary's debug info or type library, with C declarations. |
+| `*.json` | Functions (with recovered types and original source decl file/line), sections, strings, imports, exports, relocations, reachability, clusters, triage, project metadata, and export manifest. |
 | `tocode.log` | Export log with checkpoint, resume, and per-function render history. |
 | `AGENTS.md` / `CLAUDE.md` | Instructions for agents analyzing the exported binary. |
 | `src/tree` | Optional scanner-friendly C output when `--tree` is used. |

@@ -141,6 +141,19 @@ def functions_json(
                 "c_name": c_names.get(address, routine.name),
                 "prototype": prototypes.get(address),
                 "size": routine.size,
+                "calltype": routine.calltype,
+                "return_type": routine.return_type,
+                "params": [
+                    {"name": name, "type": type_name}
+                    for name, type_name in routine.params
+                ],
+                "locals": [
+                    {"name": name, "type": type_name}
+                    for name, type_name in routine.local_vars
+                ],
+                "decl_file": routine.source_file,
+                "decl_dir": routine.source_dir,
+                "decl_line": routine.source_line,
                 "nargs": raw_range.arg_count
                 if raw_range is not None and raw_range.arg_count is not None
                 else routine.args_count,
@@ -173,6 +186,22 @@ def functions_json(
             }
         )
     return {"functions": rows}
+
+
+def types_json(analysis: ProgramAnalysis) -> dict[str, object]:
+    """The aggregate type catalog the backend recovered (no invented types)."""
+    rows = [
+        {
+            "name": item.name,
+            "kind": item.kind,
+            "size": item.size,
+            "ordinal": item.ordinal,
+            "members": item.members,
+            "c_decl": item.c_decl,
+        }
+        for item in analysis.types
+    ]
+    return {"count": len(rows), "types": rows}
 
 
 def reachable_json(analysis: ProgramAnalysis) -> dict[str, object]:

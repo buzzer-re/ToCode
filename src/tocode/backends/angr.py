@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .base import BackendName
+from .dwarf import DwarfData, FuncTypes, load_dwarf
 from ..errors import BackendError
 
 
@@ -87,6 +88,11 @@ class AngrSession:
         self._funcs: dict[int, Any] = {}
         self._disasm_cache: dict[int, str] = {}
         self._decompile_cache: dict[int, str] = {}
+        # DWARF enrichment (None when the binary has no debug info / pyelftools
+        # is unavailable). Keyed by angr's rebased function address.
+        self._dwarf: DwarfData | None = None
+        self._source_by_addr: dict[int, Any] = {}
+        self._types_by_addr: dict[int, FuncTypes] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -111,11 +117,29 @@ class AngrSession:
         self._funcs = {
             int(func.addr): func for func in self.project.kb.functions.values()
         }
+        self._load_dwarf()
+
+    def _load_dwarf(self) -> None:
+        """Parse DWARF and index it by angr's rebased addresses (best-effort)."""
+        dwarf = load_dwarf(self.binary)
+        if dwarf is None:
+            return
+        self._dwarf = dwarf
+        # DWARF records link-time addresses; angr may rebase the object (PIE).
+        mo = self.project.loader.main_object
+        bias = int(getattr(mo, "image_base_delta", 0) or 0)
+        for low_pc, loc in dwarf.sources.items():
+            self._source_by_addr[low_pc + bias] = loc
+        for low_pc, types in dwarf.func_types.items():
+            self._types_by_addr[low_pc + bias] = types
 
     def close(self) -> None:
         self._funcs.clear()
         self._disasm_cache.clear()
         self._decompile_cache.clear()
+        self._source_by_addr.clear()
+        self._types_by_addr.clear()
+        self._dwarf = None
         self._cfg = None
         self.project = None
 
@@ -301,25 +325,42 @@ class AngrSession:
             is_sim = bool(getattr(func, "is_simprocedure", False))
             is_thunk = is_plt or is_sim
             nargs = self._arg_count(func)
-            rows.append(
-                {
-                    "addr": addr,
-                    "name": name,
-                    "size": int(getattr(func, "size", 0) or 0),
-                    "signature": self._signature(func),
-                    "calltype": self._calltype(func),
-                    "noreturn": not bool(getattr(func, "returning", True)),
-                    "stackframe": 0,
-                    "nlocals": 0,
-                    "nargs": nargs,
-                    "outdegree": 0,
-                    "indegree": 0,
-                    "is_library": is_plt,
-                    "is_thunk": is_thunk,
-                    "source_kind": self._classify(func, name, is_thunk=is_thunk),
-                }
-            )
+            row = {
+                "addr": addr,
+                "name": name,
+                "size": int(getattr(func, "size", 0) or 0),
+                "signature": self._signature(func),
+                "calltype": self._calltype(func),
+                "noreturn": not bool(getattr(func, "returning", True)),
+                "stackframe": 0,
+                "nlocals": 0,
+                "nargs": nargs,
+                "outdegree": 0,
+                "indegree": 0,
+                "is_library": is_plt,
+                "is_thunk": is_thunk,
+                "source_kind": self._classify(func, name, is_thunk=is_thunk),
+            }
+            self._apply_dwarf(row, addr)
+            rows.append(row)
         return rows
+
+    def _apply_dwarf(self, row: dict[str, Any], addr: int) -> None:
+        """Enrich a function row with DWARF source/type detail when available."""
+        loc = self._source_by_addr.get(addr)
+        if loc is not None:
+            row["source_file"] = loc.file
+            row["source_dir"] = loc.directory or None
+            row["source_line"] = loc.line
+        types = self._types_by_addr.get(addr)
+        if types is not None:
+            row["return_type"] = types.return_type
+            row["params"] = [{"name": n, "type": t} for n, t in types.params]
+            row["locals"] = [{"name": n, "type": t} for n, t in types.locals]
+            row["nlocals"] = len(types.locals)
+
+    def types(self) -> list[dict[str, Any]]:
+        return list(self._dwarf.types) if self._dwarf is not None else []
 
     # -- per-function rendering --------------------------------------------
 

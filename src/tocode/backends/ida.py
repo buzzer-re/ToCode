@@ -74,6 +74,9 @@ class IdaSession:
         self._ida_auto = self._optional_import("ida_auto")
         self._ida_nalt = self._optional_import("ida_nalt")
         self._ida_xref = self._optional_import("ida_xref")
+        self._ida_lines = self._optional_import("ida_lines")
+        self._ida_typeinf = self._optional_import("ida_typeinf")
+        self._srcdbg_dir: str | None = None
         self._db: Any = None
 
         if db_path is None:
@@ -474,27 +477,158 @@ class IdaSession:
             flags = self._db.functions.get_flags(func)
             is_library = bool(flags & FunctionFlags.LIB)
             is_thunk = bool(flags & FunctionFlags.THUNK)
-            rows.append(
-                {
-                    "offset": int(func.start_ea),
-                    "name": name,
-                    "size": int(func.end_ea - func.start_ea),
-                    "signature": self._db.functions.get_signature(func) or None,
-                    "calltype": None,
-                    "noreturn": not bool(self._db.functions.does_return(func)),
-                    "stackframe": int(getattr(func, "frsize", 0) or 0),
-                    "nlocals": 0,
-                    "nargs": 0,
-                    "outdegree": 0,
-                    "indegree": 0,
-                    "is_library": is_library,
-                    "is_thunk": is_thunk,
-                    "source_kind": self._classify(
-                        name, segment_name, is_library=is_library, is_thunk=is_thunk
-                    ),
-                }
-            )
+            row = {
+                "offset": int(func.start_ea),
+                "name": name,
+                "size": int(func.end_ea - func.start_ea),
+                "signature": self._db.functions.get_signature(func) or None,
+                "calltype": None,
+                "noreturn": not bool(self._db.functions.does_return(func)),
+                "stackframe": int(getattr(func, "frsize", 0) or 0),
+                "nlocals": 0,
+                "nargs": 0,
+                "outdegree": 0,
+                "indegree": 0,
+                "is_library": is_library,
+                "is_thunk": is_thunk,
+                "source_kind": self._classify(
+                    name, segment_name, is_library=is_library, is_thunk=is_thunk
+                ),
+            }
+            self._apply_source(row, int(func.start_ea))
+            self._apply_prototype(row, int(func.start_ea))
+            rows.append(row)
         return rows
+
+    def _apply_source(self, row: dict[str, Any], ea: int) -> None:
+        """Attach DWARF/debug source file/line, if IDA recovered any."""
+        lines = self._ida_lines
+        nalt = self._ida_nalt
+        try:
+            source_file = lines.get_sourcefile(ea, None) if lines is not None else None
+        except Exception:  # noqa: BLE001
+            source_file = None
+        if source_file:
+            row["source_file"] = source_file
+            row["source_dir"] = self._source_dir()
+        try:
+            line = nalt.get_source_linnum(ea) if nalt is not None else None
+        except Exception:  # noqa: BLE001
+            line = None
+        # IDA returns BADADDR (-1 / 0xffffffffffffffff) when no line is known.
+        if line is not None and 0 <= int(line) < 0xFFFFFFFF:
+            row["source_line"] = int(line)
+
+    def _source_dir(self) -> str | None:
+        if self._srcdbg_dir is None and self._ida_nalt is not None:
+            try:
+                paths = self._ida_nalt.get_srcdbg_paths() or ""
+            except Exception:  # noqa: BLE001
+                paths = ""
+            self._srcdbg_dir = paths.split(";")[0] if paths else ""
+        return self._srcdbg_dir or None
+
+    def _apply_prototype(self, row: dict[str, Any], ea: int) -> None:
+        """Attach recovered return/param types and the calling convention."""
+        tinfo = self._function_tinfo(ea)
+        if tinfo is None:
+            return
+        try:
+            funcdata = self._ida_typeinf.func_type_data_t()
+            if not tinfo.get_func_details(funcdata):
+                return
+            ret = funcdata.rettype
+            row["return_type"] = ret._print() if ret is not None else None
+            params = []
+            for arg in funcdata:
+                params.append(
+                    {
+                        "name": arg.name or "",
+                        "type": arg.type._print() if arg.type is not None else "",
+                    }
+                )
+            row["params"] = [p for p in params if p["type"]]
+            cc = funcdata.cc if hasattr(funcdata, "cc") else None
+            if cc is not None:
+                row["calltype"] = str(cc)
+        except Exception:  # noqa: BLE001
+            return
+
+    def _function_tinfo(self, ea: int) -> Any:
+        ti = self._ida_typeinf
+        nalt = self._ida_nalt
+        if ti is None or nalt is None:
+            return None
+        try:
+            tinfo = ti.tinfo_t()
+            if nalt.get_tinfo(tinfo, ea) and tinfo.is_func():
+                return tinfo
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
+    def types(self) -> list[dict[str, Any]]:
+        """Enumerate IDA's local type library (structs/unions/enums/typedefs)."""
+        ti = self._ida_typeinf
+        if ti is None:
+            return []
+        try:
+            til = ti.get_idati()
+            limit = ti.get_ordinal_limit(til)
+        except Exception:  # noqa: BLE001
+            return []
+        rows: list[dict[str, Any]] = []
+        for ordinal in range(1, int(limit or 0)):
+            try:
+                tinfo = ti.tinfo_t()
+                if not tinfo.get_numbered_type(til, ordinal):
+                    continue
+                name = tinfo.get_type_name() or ti.get_numbered_type_name(til, ordinal)
+                if not name:
+                    continue
+                c_decl = tinfo._print(
+                    name, ti.PRTYPE_MULTI | ti.PRTYPE_TYPE | ti.PRTYPE_SEMI
+                )
+                if not c_decl:
+                    continue
+                rows.append(
+                    {
+                        "name": str(name),
+                        "kind": self._type_kind(tinfo),
+                        "size": self._type_size(tinfo),
+                        "c_decl": c_decl.strip(),
+                        "members": [],
+                        "ordinal": int(ordinal),
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                continue
+        return rows
+
+    @staticmethod
+    def _type_kind(tinfo: Any) -> str:
+        try:
+            if tinfo.is_struct():
+                return "struct"
+            if tinfo.is_union():
+                return "union"
+            if tinfo.is_enum():
+                return "enum"
+            if tinfo.is_typedef():
+                return "typedef"
+        except Exception:  # noqa: BLE001
+            pass
+        return "type"
+
+    @staticmethod
+    def _type_size(tinfo: Any) -> int | None:
+        try:
+            size = tinfo.get_size()
+        except Exception:  # noqa: BLE001
+            return None
+        if size in (None, 0) or size == 0xFFFFFFFFFFFFFFFF:
+            return None
+        return int(size)
 
     def disasm(self, address: int) -> str:
         func = self._need_function(address)
