@@ -69,6 +69,35 @@ def test_load_dwarf_recovers_sources_and_types(debug_binary: Path) -> None:
     assert "GREEN = 5" in by_name["color"]["c_decl"]
 
 
+def test_load_dwarf_follows_specification_for_cpp_methods(tmp_path: Path) -> None:
+    # C++ out-of-line methods carry decl_file/line on a DW_AT_specification DIE,
+    # not on the concrete function DIE. The reader must follow that reference,
+    # otherwise such functions get no source file (and fall back to clusters).
+    compiler = shutil.which("g++") or shutil.which("clang++")
+    if compiler is None:
+        pytest.skip("no C++ compiler available")
+    src = tmp_path / "widget.cpp"
+    src.write_text(
+        "struct Widget { int v; int area() const; };\n"
+        "int Widget::area() const { return v * v; }\n"
+        "int main() { Widget w{5}; return w.area(); }\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "widget"
+    result = subprocess.run(
+        [compiler, "-g", "-O0", "-o", str(out), str(src)], capture_output=True
+    )
+    if result.returncode != 0:
+        pytest.skip("C++ compiler failed")
+
+    data = load_dwarf(out)
+    assert data is not None
+    files = {loc.file for loc in data.sources.values()}
+    # The out-of-line method's source is only recovered via DW_AT_specification.
+    assert any(f.endswith("widget.cpp") for f in files)
+    assert len(data.sources) >= 2
+
+
 def test_load_dwarf_returns_none_without_debug_info(tmp_path: Path) -> None:
     not_elf = tmp_path / "data.bin"
     not_elf.write_bytes(b"not an elf file")

@@ -79,6 +79,10 @@ class _Extractor:
         self.func_types: dict[int, FuncTypes] = {}
         self.types: list[dict[str, Any]] = []
         self._seen_types: set[str] = set()
+        # Per-CU caches (file/dir table and comp_dir) keyed by CU offset, since a
+        # function's decl_file may resolve through a DIE in a different CU.
+        self._file_tables: dict[int, list[tuple[str, str]]] = {}
+        self._comp_dirs: dict[int, str | None] = {}
 
     def run(self) -> DwarfData:
         for cu in self._dwarf.iter_CUs():
@@ -91,50 +95,85 @@ class _Extractor:
         return DwarfData(self.sources, self.func_types, self.types)
 
     def _handle_cu(self, cu: Any) -> None:
-        top = cu.get_top_DIE()
-        comp_dir = _attr_str(top, "DW_AT_comp_dir")
-        files = self._file_table(cu)
         for die in cu.iter_DIEs():
             tag = die.tag
             if tag == "DW_TAG_subprogram" and "DW_AT_low_pc" in die.attributes:
-                self._handle_subprogram(die, files, comp_dir)
+                self._handle_subprogram(die)
             elif tag in _AGGREGATE_TAGS and "DW_AT_name" in die.attributes:
                 self._handle_type(die)
 
     def _file_table(self, cu: Any) -> list[tuple[str, str]]:
         """Return [(directory, filename)] indexed the DWARF-version way."""
 
+        key = cu.cu_offset
+        cached = self._file_tables.get(key)
+        if cached is not None:
+            return cached
         line_program = self._dwarf.line_program_for_CU(cu)
-        if line_program is None:
-            return []
-        version = line_program.header["version"]
-        dirs = [_decode(entry) for entry in line_program["include_directory"]]
         files: list[tuple[str, str]] = []
-        for entry in line_program["file_entry"]:
-            name = _decode(entry.name)
-            index = entry.dir_index
-            directory = dirs[index] if 0 <= index < len(dirs) else ""
-            files.append((directory, name))
-        # DWARF < 5 indexes file_entry from 1; pad so direct indexing works.
-        if version < 5:
-            files.insert(0, ("", ""))
+        if line_program is not None:
+            version = line_program.header["version"]
+            dirs = [_decode(entry) for entry in line_program["include_directory"]]
+            for entry in line_program["file_entry"]:
+                name = _decode(entry.name)
+                index = entry.dir_index
+                directory = dirs[index] if 0 <= index < len(dirs) else ""
+                files.append((directory, name))
+            # DWARF < 5 indexes file_entry from 1; pad so direct indexing works.
+            if version < 5:
+                files.insert(0, ("", ""))
+        self._file_tables[key] = files
         return files
 
-    def _handle_subprogram(
-        self, die: Any, files: list[tuple[str, str]], comp_dir: str | None
-    ) -> None:
+    def _comp_dir(self, cu: Any) -> str | None:
+        key = cu.cu_offset
+        if key not in self._comp_dirs:
+            self._comp_dirs[key] = _attr_str(cu.get_top_DIE(), "DW_AT_comp_dir")
+        return self._comp_dirs[key]
+
+    def _resolved_attr(self, die: Any, attr: str, depth: int = 0) -> tuple[Any, Any]:
+        """Find ``attr``, following DW_AT_specification / DW_AT_abstract_origin.
+
+        C++ and optimized code routinely leave the concrete function DIE without
+        decl_file/decl_line/type, pointing instead at a specification or
+        abstract-origin DIE that carries them. Returns ``(holder_die, value)``.
+        """
+        value = die.attributes.get(attr)
+        if value is not None:
+            return die, value
+        if depth > 8:
+            return None, None
+        for ref in ("DW_AT_specification", "DW_AT_abstract_origin"):
+            if ref not in die.attributes:
+                continue
+            try:
+                target = die.get_DIE_from_attribute(ref)
+            except Exception:  # noqa: BLE001
+                target = None
+            if target is not None:
+                holder, found = self._resolved_attr(target, attr, depth + 1)
+                if found is not None:
+                    return holder, found
+        return None, None
+
+    def _handle_subprogram(self, die: Any) -> None:
         low_pc = die.attributes["DW_AT_low_pc"].value
-        file_attr = die.attributes.get("DW_AT_decl_file")
-        line_attr = die.attributes.get("DW_AT_decl_line")
-        if file_attr is not None and 0 <= file_attr.value < len(files):
-            directory, filename = files[file_attr.value]
-            rel = _relative_source(directory, filename, comp_dir)
-            self.sources[low_pc] = SourceLoc(
-                file=rel,
-                directory=os.path.dirname(rel),
-                line=line_attr.value if line_attr is not None else None,
-                comp_dir=comp_dir,
-            )
+        file_holder, file_attr = self._resolved_attr(die, "DW_AT_decl_file")
+        _, line_attr = self._resolved_attr(die, "DW_AT_decl_line")
+        if file_attr is not None and file_holder is not None:
+            # decl_file indexes the file table of the CU that *holds* it.
+            cu = file_holder.cu
+            files = self._file_table(cu)
+            if 0 <= file_attr.value < len(files):
+                directory, filename = files[file_attr.value]
+                comp_dir = self._comp_dir(cu)
+                rel = _relative_source(directory, filename, comp_dir)
+                self.sources[low_pc] = SourceLoc(
+                    file=rel,
+                    directory=os.path.dirname(rel),
+                    line=line_attr.value if line_attr is not None else None,
+                    comp_dir=comp_dir,
+                )
         self.func_types[low_pc] = self._subprogram_types(die)
 
     def _subprogram_types(self, die: Any) -> FuncTypes:
@@ -251,9 +290,10 @@ class _Extractor:
         return _ref(die), dims or [None]
 
     def _type_of(self, die: Any) -> str | None:
-        if "DW_AT_type" not in die.attributes:
+        holder, _ = self._resolved_attr(die, "DW_AT_type")
+        if holder is None:
             return None
-        return self._type_str(_ref(die))
+        return self._type_str(_ref(holder))
 
     def _type_str(self, die: Any, depth: int = 0) -> str:
         if die is None or depth > 12:
