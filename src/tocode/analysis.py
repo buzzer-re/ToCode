@@ -20,6 +20,7 @@ from .schema import (
     Segment,
     StringEntry,
     SymbolEntry,
+    TypeDef,
 )
 
 
@@ -69,7 +70,7 @@ class BinaryAnalyzer:
             or f"{self.session.backend_label} auto-analysis"
         )
         self.progress.log(f"Analyzing with {label}")
-        with self.progress.bar(total=16, desc="analyze", unit="step") as bar:
+        with self.progress.bar(total=17, desc="analyze", unit="step") as bar:
             self.session.analyze()
             bar.update(1)
             info = self.session.info()
@@ -102,6 +103,8 @@ class BinaryAnalyzer:
             bar.update(1)
             thunks = self._thunks(routines, callees, import_calls)
             bar.update(1)
+            types = self._types()
+            bar.update(1)
             self.session.ensure_decompiler()
             bar.update(1)
 
@@ -131,6 +134,7 @@ class BinaryAnalyzer:
             roots=roots,
             thunks=thunks,
             data_xrefs=data_xrefs,
+            types=types,
         )
         self.analysis = analysis
         self.analysis_seconds = time.monotonic() - started
@@ -249,6 +253,41 @@ class BinaryAnalyzer:
                 thunk=bool(row.get("is_thunk", False)),
                 code_kind=str(row.get("source_kind", "app") or "app"),
                 segment=self._segment_name(address, segments),
+                source_file=_clean_text(row.get("source_file")),
+                source_dir=_clean_text(row.get("source_dir")),
+                source_line=_opt_int(row.get("source_line")),
+                return_type=_clean_text(row.get("return_type")),
+                params=_name_type_pairs(row.get("params")),
+                local_vars=_name_type_pairs(row.get("locals")),
+            )
+        return result
+
+    def _types(self) -> list[TypeDef]:
+        collect = getattr(self.session, "types", None)
+        if not callable(collect):
+            return []
+        try:
+            rows = collect()
+        except Exception:  # noqa: BLE001 - type recovery must never break analysis
+            return []
+        result: list[TypeDef] = []
+        for row in rows or ():
+            if not isinstance(row, dict):
+                continue
+            name = _clean_text(row.get("name"))
+            c_decl = _clean_text(row.get("c_decl"))
+            if not name or not c_decl:
+                continue
+            members = row.get("members")
+            result.append(
+                TypeDef(
+                    name=name,
+                    kind=str(row.get("kind", "type") or "type"),
+                    size=_opt_int(row.get("size")),
+                    c_decl=c_decl,
+                    members=list(members) if isinstance(members, list) else [],
+                    ordinal=_opt_int(row.get("ordinal")),
+                )
             )
         return result
 
@@ -485,3 +524,37 @@ def _first_int(row: dict[str, Any], *keys: str) -> int | None:
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _clean_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _opt_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _name_type_pairs(value: Any) -> list[tuple[str, str]]:
+    """Normalize a backend's params/locals list into (name, type) tuples."""
+    pairs: list[tuple[str, str]] = []
+    if not isinstance(value, list):
+        return pairs
+    for item in value:
+        if isinstance(item, dict):
+            name = str(item.get("name", "") or "")
+            type_name = str(item.get("type", "") or "")
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            name, type_name = str(item[0] or ""), str(item[1] or "")
+        else:
+            continue
+        if type_name:
+            pairs.append((name, type_name))
+    return pairs

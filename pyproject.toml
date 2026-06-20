@@ -42,6 +42,12 @@ angr = [
 module = ["angr.*"]
 ignore_missing_imports = true
 
+# pyelftools (elftools) ships with the angr extra via cle, so it is likewise
+# absent from the type checking environment. Ignore its missing imports.
+[[tool.mypy.overrides]]
+module = ["elftools.*"]
+ignore_missing_imports = true
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 

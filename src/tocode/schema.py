@@ -46,6 +46,14 @@ class Routine:
     thunk: bool = False
     code_kind: str = "app"
     segment: str | None = None
+    # Original source location, recovered from DWARF/IDA debug info when present.
+    source_file: str | None = None
+    source_dir: str | None = None
+    source_line: int | None = None
+    # Recovered prototype detail (types respected from the backend, not invented).
+    return_type: str | None = None
+    params: list[tuple[str, str]] = field(default_factory=list)
+    local_vars: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -116,6 +124,21 @@ class Cluster:
     summary: str
     members: list[int]
     folder: str = "app"
+    # Source basename driving the output filename when grouped by source file
+    # (e.g. "socket" -> socket.c/.asm/.summary). None falls back to cluster_<root>.
+    file_base: str | None = None
+
+
+@dataclass(slots=True)
+class TypeDef:
+    """A type the backend identified (struct/union/enum/typedef/base/func)."""
+
+    name: str
+    kind: str
+    size: int | None
+    c_decl: str
+    members: list[dict] = field(default_factory=list)
+    ordinal: int | None = None
 
 
 @dataclass(slots=True)
@@ -137,6 +160,8 @@ class FunctionRange:
     asm_line_end: int
     arg_count: int | None = None
     local_count: int | None = None
+    origin_file: str | None = None
+    origin_line: int | None = None
 
 
 @dataclass(slots=True)
@@ -188,6 +213,7 @@ class ProgramAnalysis:
     import_calls: dict[int, list[str]]
     roots: list[int]
     thunks: set[int]
+    types: list[TypeDef] = field(default_factory=list)
     # Data address -> list of (referencing instruction address, is_write), taken
     # directly from the decompiler's cross-reference database during analysis.
     data_xrefs: dict[int, list[tuple[int, bool]]] = field(default_factory=dict)

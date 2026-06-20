@@ -48,6 +48,22 @@ class DecompilerSession(Protocol):
 
     def functions(self) -> list[dict[str, Any]]: ...
 
+    # functions() rows may carry these optional keys (read with .get, defaulting
+    # to None/[]), enriching the export when the backend recovered them:
+    #   source_file, source_dir, source_line  -> original DWARF/debug location
+    #   return_type: str | None               -> recovered return type
+    #   params:  list[{"name": str, "type": str}]
+    #   locals:  list[{"name": str, "type": str}]
+    #   calltype: str | None                  -> calling convention
+
+    def types(self) -> list[dict[str, Any]]:
+        """Aggregate type catalog the backend identified.
+
+        Optional: consumers call it defensively. Each row:
+        ``{"name", "kind", "size"|None, "c_decl", "members"?, "ordinal"?}``.
+        """
+        ...
+
     def disasm(self, address: int) -> str: ...
 
     def decompile(self, address: int) -> str: ...
