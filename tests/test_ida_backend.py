@@ -4,7 +4,17 @@ from typing import Any
 
 from pathlib import Path
 
-from tocode.backends.ida import IdaSession, _purge_database
+from tocode.backends.ida import IdaSession, _is_unpacked, _purge_database
+
+
+def test_is_unpacked_detects_open_database(tmp_path: Path) -> None:
+    db = tmp_path / "abcdef.v2.i64"
+    db.write_bytes(b"packed")
+    # A lone .i64 is a cleanly closed (packed) database.
+    assert _is_unpacked(db) is False
+    # An unpacked component beside it means the database is open / interrupted.
+    db.with_suffix(".id0").write_bytes(b"open")
+    assert _is_unpacked(db) is True
 
 
 def test_purge_database_removes_unpacked_components(tmp_path: Path) -> None:

@@ -467,6 +467,7 @@ def create_analyzer(
     progress: Progress | None = None,
     idadir: Path | None = None,
     ida_domain_path: Path | None = None,
+    purge_cache: bool = False,
 ) -> BinaryAnalyzer:
     choice = choose_backend(
         backend,
@@ -483,7 +484,12 @@ def create_analyzer(
     if choice.selected == "ida":
         return BinaryAnalyzer(
             binary,
-            session=IdaSession(binary, idadir=idadir, ida_domain_path=ida_domain_path),
+            session=IdaSession(
+                binary,
+                idadir=idadir,
+                ida_domain_path=ida_domain_path,
+                purge_cache=purge_cache,
+            ),
             progress=progress,
         )
     if choice.selected == "angr":

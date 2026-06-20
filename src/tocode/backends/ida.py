@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+import sys
 from typing import Any
 
 from .base import BackendName, bootstrap_ida, is_ida_database
@@ -64,6 +65,22 @@ def _purge_database(path: Path) -> None:
             pass
 
 
+def _is_unpacked(path: Path) -> bool:
+    """True when the database is unpacked (open elsewhere, or interrupted).
+
+    A cleanly closed IDA database is a single packed ``.i64``; while it is open
+    IDA keeps unpacked component files (``.id0`` etc.) beside it.
+    """
+    return any(
+        path.with_suffix(suffix).exists()
+        for suffix in (".id0", ".id1", ".id2", ".nam", ".til")
+    )
+
+
+def _warn(message: str) -> None:
+    print(f"tocode: warning: {message}", file=sys.stderr)
+
+
 def _drop_stale_databases(root: Path, digest: str, *, keep: Path) -> None:
     """Remove older cached databases for this binary built a different way."""
     for stale in (*root.glob(f"{digest}.i64"), *root.glob(f"{digest}.v*.i64")):
@@ -90,6 +107,7 @@ class IdaSession:
         ida_domain_path: Path | None = None,
         db_path: Path | None = None,
         needs_analysis: bool | None = None,
+        purge_cache: bool = False,
     ) -> None:
         self.binary = Path(binary).resolve()
         self.idadir = idadir.resolve() if idadir is not None else None
@@ -133,12 +151,24 @@ class IdaSession:
             try:
                 self._open_existing(resolved_db)
             except BackendError:
-                # A cached database can be broken: a previous analysis may have
-                # been killed (e.g. OOM), leaving an unpacked/partial db that
-                # cannot be reopened. When we can rebuild from the original
-                # binary, purge the bad cache and re-analyze instead of failing.
-                if is_ida_database(self.binary):
+                # The cached database could not be opened. This usually means it
+                # is "unpacked": the database is open in another IDA session, or
+                # a previous analysis was interrupted (e.g. OOM). Deleting it
+                # would destroy a live session's work, so never purge implicitly
+                # -- require the user to opt in with --purge-cache.
+                if is_ida_database(self.binary) or not _is_unpacked(resolved_db):
                     raise
+                if not purge_cache:
+                    raise BackendError(
+                        f"the IDA database at {resolved_db} is unpacked "
+                        "(it is open in another IDA session, or a previous run "
+                        "was interrupted). Close your IDA session, or re-run "
+                        "with --purge-cache to discard and rebuild it."
+                    )
+                _warn(
+                    f"--purge-cache: discarding the unpacked IDA database at "
+                    f"{resolved_db} and rebuilding it."
+                )
                 _purge_database(resolved_db)
                 self._open_fresh(resolved_db)
 

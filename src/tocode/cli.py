@@ -63,6 +63,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a local ida-domain checkout.",
     )
     parser.add_argument(
+        "--purge-cache",
+        action="store_true",
+        help=(
+            "Discard and rebuild a cached IDA database that cannot be opened "
+            "because it is unpacked (open in another IDA session or left by an "
+            "interrupted run). Destroys that database, so close IDA first."
+        ),
+    )
+    parser.add_argument(
         "--analysis",
         default="aaa",
         help="radare2 analysis command (default: aaa; r2 backend only).",
@@ -158,6 +167,7 @@ def _run_one(
         progress=progress,
         idadir=args.idadir,
         ida_domain_path=args.ida_domain_path,
+        purge_cache=args.purge_cache,
     ) as analyzer:
         return export_binary(
             analyzer,
