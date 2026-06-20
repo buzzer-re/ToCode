@@ -95,11 +95,17 @@ class IdaSession:
         self._cache_db = None if is_ida_database(self.binary) else resolved_db
         if needs_analysis:
             self._opened_for_analysis = True
+            # import_lnnums makes the DWARF loader import source file/line info
+            # (off by default: DWARF_IMPORT_LNNUMS=NO), which feeds
+            # get_sourcefile()/get_source_linnum() used for source grouping.
             options = self._Options(
                 auto_analysis=True,
                 new_database=True,
                 output_database=str(resolved_db),
-                plugin_options="lumina:host=0.0.0.0 -Osecondary_lumina:host=0.0.0.0",
+                plugin_options=(
+                    "lumina:host=0.0.0.0 -Osecondary_lumina:host=0.0.0.0"
+                    " -Odwarf:import_lnnums=1"
+                ),
             )
             try:
                 self._db = self._Database.open(
