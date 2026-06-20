@@ -229,6 +229,25 @@ def test_export_binary_writes_source_tree_and_metadata(tmp_path: Path) -> None:
     assert not (summary.root_dir / ".tocode").exists()
 
 
+def test_relativize_sources_strips_common_root() -> None:
+    from tocode.exporter import _relativize_sources
+
+    # Absolute build paths (as IDA reports) collapse to a shared-root-relative tree.
+    files = [
+        "/opt/project/build/src/core/util.h",
+        "/opt/project/build/src/net/socket.cpp",
+    ]
+    rel = _relativize_sources(files)
+    assert rel[files[0]] == "core/util.h"
+    assert rel[files[1]] == "net/socket.cpp"
+    # A single absolute file collapses to its basename.
+    assert _relativize_sources(["/a/b/c/widget.cpp"]) == {
+        "/a/b/c/widget.cpp": "widget.cpp"
+    }
+    # Already-relative paths (as angr reports) are left untouched.
+    assert _relativize_sources(["net/socket.c"]) == {"net/socket.c": "net/socket.c"}
+
+
 def test_export_groups_by_source_file_and_exports_types(tmp_path: Path) -> None:
     binary = tmp_path / "sample.bin"
     binary.write_bytes(b"\x7fELF" + b"\x00" * 256 + b"hello\x00")

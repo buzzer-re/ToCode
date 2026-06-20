@@ -3003,7 +3003,6 @@ def _source_file_clusters(
     source info (handled by the normal clustering path).
     """
     by_file: dict[str, list[int]] = {}
-    folders: dict[str, str] = {}
     remaining: set[int] = set()
     for routine in analysis.app_routines():
         source_file = routine.source_file
@@ -3011,12 +3010,15 @@ def _source_file_clusters(
             remaining.add(routine.address)
             continue
         by_file.setdefault(source_file, []).append(routine.address)
-        folders.setdefault(source_file, routine.source_dir or "")
+    # Backends (notably IDA) report absolute build paths; strip a shared root so
+    # the tree mirrors the project layout instead of being anchored at "/".
+    relative = _relativize_sources(list(by_file))
     clusters: list[Cluster] = []
     for source_file, members in sorted(by_file.items()):
         members.sort()
-        base = Path(source_file).stem or "source"
-        folder = folders[source_file]
+        rel = relative[source_file]
+        base = Path(rel).stem or "source"
+        folder = str(Path(rel).parent) if Path(rel).parent != Path(".") else ""
         many = len(members) > MAX_FUNCTIONS_PER_FILE
         for index, chunk in enumerate(_chunks(members, MAX_FUNCTIONS_PER_FILE)):
             clusters.append(
@@ -3030,6 +3032,33 @@ def _source_file_clusters(
                 )
             )
     return clusters, remaining
+
+
+def _relativize_sources(files: list[str]) -> dict[str, str]:
+    """Map each source path to one relative to the common root of all of them."""
+    absolute = [f for f in files if os.path.isabs(f)]
+    root = ""
+    if absolute:
+        try:
+            root = (
+                os.path.commonpath(absolute)
+                if len(absolute) > 1
+                else os.path.dirname(absolute[0])
+            )
+        except ValueError:  # mixed drives/roots
+            root = ""
+    result: dict[str, str] = {}
+    for source_file in files:
+        if os.path.isabs(source_file) and root:
+            try:
+                result[source_file] = os.path.relpath(source_file, root)
+                continue
+            except ValueError:
+                pass
+        result[source_file] = (
+            source_file.lstrip("/") if os.path.isabs(source_file) else source_file
+        )
+    return result
 
 
 def _fast_clusters(
