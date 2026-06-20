@@ -10,6 +10,9 @@ from ..errors import BackendError
 
 
 _MAX_THUNK_HOPS = 5
+# How many instruction heads to scan from a function's start looking for the
+# first DWARF source file/line annotation (the entry head is not always tagged).
+_SOURCE_SCAN_HEADS = 32
 
 
 def _cache_root() -> Path:
@@ -495,29 +498,55 @@ class IdaSession:
                     name, segment_name, is_library=is_library, is_thunk=is_thunk
                 ),
             }
-            self._apply_source(row, int(func.start_ea))
+            self._apply_source(row, func)
             self._apply_prototype(row, int(func.start_ea))
             rows.append(row)
         return rows
 
-    def _apply_source(self, row: dict[str, Any], ea: int) -> None:
-        """Attach DWARF/debug source file/line, if IDA recovered any."""
+    def _apply_source(self, row: dict[str, Any], func: Any) -> None:
+        """Attach DWARF source file/line that IDA recovered for the function.
+
+        IDA records source files/lines per address; the function entry is not
+        always annotated, so scan the first few heads until both are found.
+        """
         lines = self._ida_lines
         nalt = self._ida_nalt
-        try:
-            source_file = lines.get_sourcefile(ea, None) if lines is not None else None
-        except Exception:  # noqa: BLE001
-            source_file = None
+        if lines is None and nalt is None:
+            return
+        ea = int(func.start_ea)
+        end = int(func.end_ea)
+        source_file: str | None = None
+        source_line: int | None = None
+        scanned = 0
+        while ea < end and scanned < _SOURCE_SCAN_HEADS:
+            if source_file is None and lines is not None:
+                try:
+                    candidate = lines.get_sourcefile(ea, None)
+                except Exception:  # noqa: BLE001
+                    candidate = None
+                if candidate:
+                    source_file = candidate
+            if source_line is None and nalt is not None:
+                try:
+                    line = nalt.get_source_linnum(ea)
+                except Exception:  # noqa: BLE001
+                    line = None
+                # IDA returns BADADDR when no line is known; lines are 1-based.
+                if line is not None and 0 < int(line) < 0xFFFFFFFF:
+                    source_line = int(line)
+            if source_file is not None and source_line is not None:
+                break
+            nxt = int(self._ida_bytes.next_head(ea, end))
+            if nxt <= ea:
+                break
+            ea = nxt
+            scanned += 1
         if source_file:
+            directory = os.path.dirname(source_file)
             row["source_file"] = source_file
-            row["source_dir"] = self._source_dir()
-        try:
-            line = nalt.get_source_linnum(ea) if nalt is not None else None
-        except Exception:  # noqa: BLE001
-            line = None
-        # IDA returns BADADDR (-1 / 0xffffffffffffffff) when no line is known.
-        if line is not None and 0 <= int(line) < 0xFFFFFFFF:
-            row["source_line"] = int(line)
+            row["source_dir"] = directory or self._source_dir()
+        if source_line is not None:
+            row["source_line"] = source_line
 
     def _source_dir(self) -> str | None:
         if self._srcdbg_dir is None and self._ida_nalt is not None:
@@ -529,7 +558,7 @@ class IdaSession:
         return self._srcdbg_dir or None
 
     def _apply_prototype(self, row: dict[str, Any], ea: int) -> None:
-        """Attach recovered return/param types and the calling convention."""
+        """Attach recovered return/param types from IDA's function type info."""
         tinfo = self._function_tinfo(ea)
         if tinfo is None:
             return
@@ -538,19 +567,20 @@ class IdaSession:
             if not tinfo.get_func_details(funcdata):
                 return
             ret = funcdata.rettype
-            row["return_type"] = ret._print() if ret is not None else None
+            if ret is not None:
+                row["return_type"] = ret.dstr()
             params = []
             for arg in funcdata:
+                arg_type = arg.type
                 params.append(
                     {
                         "name": arg.name or "",
-                        "type": arg.type._print() if arg.type is not None else "",
+                        "type": arg_type.dstr() if arg_type is not None else "",
                     }
                 )
-            row["params"] = [p for p in params if p["type"]]
-            cc = funcdata.cc if hasattr(funcdata, "cc") else None
-            if cc is not None:
-                row["calltype"] = str(cc)
+            params = [p for p in params if p["type"]]
+            if params:
+                row["params"] = params
         except Exception:  # noqa: BLE001
             return
 
@@ -568,27 +598,26 @@ class IdaSession:
         return None
 
     def types(self) -> list[dict[str, Any]]:
-        """Enumerate IDA's local type library (structs/unions/enums/typedefs)."""
-        ti = self._ida_typeinf
-        if ti is None:
-            return []
-        try:
-            til = ti.get_idati()
-            limit = ti.get_ordinal_limit(til)
-        except Exception:  # noqa: BLE001
+        """Enumerate the database's named types (structs/unions/enums/typedefs)."""
+        if self._ida_typeinf is None:
             return []
         rows: list[dict[str, Any]] = []
-        for ordinal in range(1, int(limit or 0)):
+        try:
+            type_iter = iter(self._db.types)
+        except Exception:  # noqa: BLE001
+            return []
+        while True:
             try:
-                tinfo = ti.tinfo_t()
-                if not tinfo.get_numbered_type(til, ordinal):
-                    continue
-                name = tinfo.get_type_name() or ti.get_numbered_type_name(til, ordinal)
+                tinfo = next(type_iter)
+            except StopIteration:
+                break
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                name = tinfo.get_type_name()
                 if not name:
                     continue
-                c_decl = tinfo._print(
-                    name, ti.PRTYPE_MULTI | ti.PRTYPE_TYPE | ti.PRTYPE_SEMI
-                )
+                c_decl = self._render_type_decl(tinfo, str(name))
                 if not c_decl:
                     continue
                 rows.append(
@@ -596,14 +625,37 @@ class IdaSession:
                         "name": str(name),
                         "kind": self._type_kind(tinfo),
                         "size": self._type_size(tinfo),
-                        "c_decl": c_decl.strip(),
+                        "c_decl": c_decl,
                         "members": [],
-                        "ordinal": int(ordinal),
+                        "ordinal": None,
                     }
                 )
             except Exception:  # noqa: BLE001
                 continue
         return rows
+
+    def _render_type_decl(self, tinfo: Any, name: str) -> str | None:
+        """Render a type as a full C declaration, with fallbacks across APIs."""
+        ti = self._ida_typeinf
+        flags = ti.PRTYPE_MULTI | ti.PRTYPE_TYPE | ti.PRTYPE_DEF | ti.PRTYPE_SEMI
+        # Preferred: serialize then format, which yields the full struct body.
+        try:
+            serialized = tinfo.serialize()
+            if serialized and len(serialized) >= 2:
+                decl = ti.idc_print_type(serialized[0], serialized[1], name, flags)
+                if decl:
+                    return decl.strip()
+        except Exception:  # noqa: BLE001
+            pass
+        # Fallback: the type's own string form.
+        try:
+            text = tinfo.dstr()
+        except Exception:  # noqa: BLE001
+            text = None
+        if not text:
+            return None
+        text = text.strip()
+        return text if text.endswith(";") else text + ";"
 
     @staticmethod
     def _type_kind(tinfo: Any) -> str:
