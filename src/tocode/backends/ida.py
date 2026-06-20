@@ -49,6 +49,21 @@ def _database_path(binary: Path) -> tuple[Path, bool]:
     return path, not path.exists()
 
 
+# IDA database components left on disk alongside the packed .i64; a killed
+# analysis can leave these unpacked, which blocks reopening the database.
+_IDA_DB_SUFFIXES = (".i64", ".id0", ".id1", ".id2", ".nam", ".til")
+
+
+def _purge_database(path: Path) -> None:
+    """Remove a database and any unpacked component files left beside it."""
+    for suffix in _IDA_DB_SUFFIXES:
+        component = path.with_suffix(suffix)
+        try:
+            component.unlink()
+        except OSError:
+            pass
+
+
 def _drop_stale_databases(root: Path, digest: str, *, keep: Path) -> None:
     """Remove older cached databases for this binary built a different way."""
     for stale in (*root.glob(f"{digest}.i64"), *root.glob(f"{digest}.v*.i64")):
@@ -113,45 +128,59 @@ class IdaSession:
 
         self._cache_db = None if is_ida_database(self.binary) else resolved_db
         if needs_analysis:
-            self._opened_for_analysis = True
-            # import_lnnums makes the DWARF loader import source file/line info
-            # (off by default: DWARF_IMPORT_LNNUMS=NO), which feeds
-            # get_sourcefile()/get_source_linnum() used for source grouping.
-            options = self._Options(
-                auto_analysis=True,
-                new_database=True,
-                output_database=str(resolved_db),
-                plugin_options=(
-                    "lumina:host=0.0.0.0 -Osecondary_lumina:host=0.0.0.0"
-                    " -Odwarf:import_lnnums=1"
-                ),
-            )
-            try:
-                self._db = self._Database.open(
-                    str(self.binary), args=options, save_on_close=True
-                )
-            except Exception as exc:  # noqa: BLE001
-                raise BackendError(
-                    f"failed to open IDA database for {self.binary}"
-                ) from exc
-            self._wait_for_auto_analysis()
+            self._open_fresh(resolved_db)
         else:
-            self._opened_for_analysis = False
-            options = self._Options(auto_analysis=False, new_database=False)
             try:
-                self._db = self._Database.open(
-                    str(resolved_db), args=options, save_on_close=False
-                )
-            except Exception as exc:  # noqa: BLE001
-                raise BackendError(
-                    f"failed to open IDA database at {resolved_db}"
-                ) from exc
+                self._open_existing(resolved_db)
+            except BackendError:
+                # A cached database can be broken: a previous analysis may have
+                # been killed (e.g. OOM), leaving an unpacked/partial db that
+                # cannot be reopened. When we can rebuild from the original
+                # binary, purge the bad cache and re-analyze instead of failing.
+                if is_ida_database(self.binary):
+                    raise
+                _purge_database(resolved_db)
+                self._open_fresh(resolved_db)
 
         self._strings_ready = False
         self._decompiler_ready = False
         self._locals_cache: dict[int, list[Any]] = {}
         self._imports_cache: list[dict[str, Any]] | None = None
         self._relocs_cache: list[dict[str, Any]] | None = None
+
+    def _open_fresh(self, resolved_db: Path) -> None:
+        self._opened_for_analysis = True
+        # import_lnnums makes the DWARF loader import source file/line info
+        # (off by default: DWARF_IMPORT_LNNUMS=NO), which feeds
+        # get_sourcefile()/get_source_linnum() used for source grouping.
+        options = self._Options(
+            auto_analysis=True,
+            new_database=True,
+            output_database=str(resolved_db),
+            plugin_options=(
+                "lumina:host=0.0.0.0 -Osecondary_lumina:host=0.0.0.0"
+                " -Odwarf:import_lnnums=1"
+            ),
+        )
+        try:
+            self._db = self._Database.open(
+                str(self.binary), args=options, save_on_close=True
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise BackendError(
+                f"failed to open IDA database for {self.binary}"
+            ) from exc
+        self._wait_for_auto_analysis()
+
+    def _open_existing(self, resolved_db: Path) -> None:
+        self._opened_for_analysis = False
+        options = self._Options(auto_analysis=False, new_database=False)
+        try:
+            self._db = self._Database.open(
+                str(resolved_db), args=options, save_on_close=False
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise BackendError(f"failed to open IDA database at {resolved_db}") from exc
 
     def _optional_import(self, module: str):
         try:

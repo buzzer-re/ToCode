@@ -2,7 +2,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from tocode.backends.ida import IdaSession
+from pathlib import Path
+
+from tocode.backends.ida import IdaSession, _purge_database
+
+
+def test_purge_database_removes_unpacked_components(tmp_path: Path) -> None:
+    # A killed analysis can leave the .i64 plus unpacked component files; purge
+    # must remove all of them so the database can be rebuilt cleanly.
+    db = tmp_path / "abcdef.v2.i64"
+    components = [db.with_suffix(s) for s in (".i64", ".id0", ".id1", ".nam", ".til")]
+    for component in components:
+        component.write_bytes(b"stub")
+    _purge_database(db)
+    assert not any(c.exists() for c in components)
 
 
 class _FakeFunction:
