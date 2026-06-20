@@ -32,13 +32,32 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+# Bump when a change to how the database is built (e.g. loader options) makes a
+# previously cached .i64 stale, so old caches are not silently reused.
+_IDA_DB_VERSION = 2
+
+
 def _database_path(binary: Path) -> tuple[Path, bool]:
     if is_ida_database(binary):
         return binary, False
     root = _cache_root()
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{_sha256(binary)}.i64"
+    digest = _sha256(binary)
+    path = root / f"{digest}.v{_IDA_DB_VERSION}.i64"
+    if not path.exists():
+        _drop_stale_databases(root, digest, keep=path)
     return path, not path.exists()
+
+
+def _drop_stale_databases(root: Path, digest: str, *, keep: Path) -> None:
+    """Remove older cached databases for this binary built a different way."""
+    for stale in (*root.glob(f"{digest}.i64"), *root.glob(f"{digest}.v*.i64")):
+        if stale == keep:
+            continue
+        try:
+            stale.unlink()
+        except OSError:  # noqa: PERF203 - best-effort cache cleanup
+            pass
 
 
 class IdaSession:
