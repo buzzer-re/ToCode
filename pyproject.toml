@@ -12,6 +12,7 @@ dependencies = [
   "ida-domain==0.5.0",
   "idapro==0.0.9",
   "r2pipe==1.9.8",
+  "rpyc==6.0.2",
   "tqdm==4.67.3",
 ]
 license = "MIT"
@@ -35,6 +36,10 @@ dev = [
 angr = [
   "angr>=9.2",
 ]
+# The Binary Ninja backend's headless client (rpyc) is a core runtime dependency
+# above so `tocode --backend binja` works out of the box. The binaryninja module
+# itself is provided by the Binary Ninja install (in-UI) or the remote VM via
+# binja-headless, so it is intentionally not a pip dependency.
 
 # angr is an optional backend dependency, so it may be absent from the type
 # checking environment. Ignore its missing stubs/imports rather than failing.
@@ -46,6 +51,12 @@ ignore_missing_imports = true
 # absent from the type checking environment. Ignore its missing imports.
 [[tool.mypy.overrides]]
 module = ["elftools.*"]
+ignore_missing_imports = true
+
+# binaryninja is supplied by the Binary Ninja install, so it is absent from the
+# type checking environment. Ignore its missing imports.
+[[tool.mypy.overrides]]
+module = ["binaryninja.*"]
 ignore_missing_imports = true
 
 [tool.setuptools]
