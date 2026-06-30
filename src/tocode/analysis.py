@@ -468,6 +468,10 @@ def create_analyzer(
     idadir: Path | None = None,
     ida_domain_path: Path | None = None,
     purge_cache: bool = False,
+    binja_host: str = "127.0.0.1",
+    binja_port: int = 18812,
+    binja_bv: Any = None,
+    binja_bn: Any = None,
 ) -> BinaryAnalyzer:
     choice = choose_backend(
         backend,
@@ -502,6 +506,17 @@ def create_analyzer(
             session=AngrSession(binary),
             progress=progress,
         )
+    if choice.selected == "binja":
+        # Imported lazily so non-binja exports never need the binaryninja/rpyc
+        # stack. With an injected view (in the Binary Ninja UI) the session wraps
+        # it directly; otherwise connect headless via binja-headless (RPyc).
+        from .backends.binja import BinjaSession
+
+        if binja_bv is not None:
+            session: DecompilerSession = BinjaSession(bv=binja_bv, bn=binja_bn)
+        else:
+            session = BinjaSession.connect_headless(binja_host, binja_port, path=binary)
+        return BinaryAnalyzer(binary, session=session, progress=progress)
     return BinaryAnalyzer(
         binary,
         session=R2Session(binary, analysis_command=analysis_command),

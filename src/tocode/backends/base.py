@@ -12,8 +12,8 @@ from typing import Any, Literal, Protocol
 from ..errors import ToCodeError
 
 
-BackendRequest = Literal["auto", "ida", "r2", "angr"]
-BackendName = Literal["ida", "r2", "angr"]
+BackendRequest = Literal["auto", "ida", "r2", "angr", "binja"]
+BackendName = Literal["ida", "r2", "angr", "binja"]
 IDA_DATABASE_SUFFIXES = frozenset({".i64", ".idb"})
 
 
@@ -102,9 +102,18 @@ def choose_backend(
     ida_domain_path: Path | None = None,
 ) -> BackendChoice:
     if input_path is not None and is_ida_database(input_path):
-        if requested in {"r2", "angr"}:
+        if requested in {"r2", "angr", "binja"}:
             raise ToCodeError("IDA database input requires the IDA backend")
         requested = "ida"
+
+    if requested == "binja":
+        # binja is satisfied either by a local ``binaryninja`` (running inside the
+        # Binary Ninja UI) or by an RPyc connection to binja-headless. Neither is
+        # checked here: the in-UI session is constructed with an injected view,
+        # and the headless connection's real failure surfaces with a clear
+        # message at connect time. ``auto`` never picks binja -- it requires a
+        # running Binary Ninja, so it stays opt-in.
+        return BackendChoice(requested, "binja", "selected by CLI")
 
     if requested == "r2":
         if not probe_r2():
@@ -156,6 +165,13 @@ def probe_r2() -> bool:
 
 def probe_angr() -> bool:
     return importlib.util.find_spec("angr") is not None
+
+
+def probe_binja() -> bool:
+    # Advisory only: true when running inside (or alongside) a Binary Ninja that
+    # exposes the ``binaryninja`` module locally. The headless path needs ``rpyc``
+    # instead, so binja selection is explicit rather than auto-probed.
+    return importlib.util.find_spec("binaryninja") is not None
 
 
 def is_ida_database(path: Path) -> bool:

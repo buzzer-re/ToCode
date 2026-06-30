@@ -72,7 +72,10 @@ Three backends are supported, selected with `--backend` (default `auto`, which p
 
    The angr export is structurally identical to the others (same files and metadata); its pseudo-C is lower quality than Hex-Rays or r2ghidra.
 
+ 4. **Binary Ninja**, is opt-in (`--backend binja`) and never chosen by `auto`, because it drives a running Binary Ninja instead of reading a file. See [Binary Ninja](#binary-ninja) below.
+
 Other disassemblers may be added in the future.
+
 
 ### Using
 
@@ -121,6 +124,54 @@ codex
 Interrupted exports save progress automatically. Rerun the same command to resume from cached function renders, or add `--restart` to ignore the saved checkpoint and start over.
 tocode firmwareX.bin.i64 -o firmwareX_decompiled/
 ...
+```
+
+### Binary Ninja
+
+The Binary Ninja backend exports the binary you already have **open** in Binary Ninja, emitting its Pseudo C. It does **not** need a Binary Ninja *headless* license: ToCode connects to the running GUI over a small RPC bridge.
+
+Since I don't have access to Binary Ninja headless, run this script once in Binary Ninja's Python console to open an RPC server ToCode can connect to:
+
+```python
+import threading, rpyc, binaryninja
+from rpyc.utils.server import ThreadedServer
+
+class ToCodeService(rpyc.Service):
+    exposed_binaryninja = binaryninja
+    def exposed_bv(self):
+        return bv  # the currently focused view
+    def exposed_eval(self, cmd):
+        return eval(cmd)
+
+server = ThreadedServer(
+    ToCodeService,
+    hostname="127.0.0.1",
+    port=18812,
+    protocol_config={"allow_all_attrs": True},
+)
+threading.Thread(target=server.start, daemon=True).start()
+print("ToCode RPC server listening on 127.0.0.1:18812")
+```
+
+It exposes the whole Binary Ninja Python VM with no authentication, so keep it bound to `127.0.0.1`. The [binja-headless](https://github.com/hugsy/binja-headless) plugin exposes the same interface if you prefer a packaged option.
+
+Then drive it from ToCode:
+
+```bash
+tocode --backend binja --list-binja              # list open views with an index
+tocode --backend binja -o out/                   # export the focused view
+tocode --backend binja --binja-view 1 -o out/    # export a specific view by index
+tocode --backend binja --all-views -o out/       # export every open view, one folder each
+```
+
+Use `--binja-host` / `--binja-port` (or `TOCODE_BINJA_HOST` / `TOCODE_BINJA_PORT`; default `127.0.0.1:18812`) to reach Binary Ninja on another machine.
+
+Already scripting inside Binary Ninja? Skip the server and export the live view directly:
+
+```python
+import sys; sys.path.insert(0, "/path/to/ToCode/src")
+from tocode import export_from_binaryview
+export_from_binaryview(bv, "out/")
 ```
 
 ## Development

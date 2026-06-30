@@ -72,6 +72,11 @@ MERGED_CLUSTER_FUNCTIONS = 12
 MERGED_CLUSTER_BYTES = 0x800
 DEFAULT_FUNCTION_TIMEOUT_SECONDS = 300
 DEFAULT_MAX_FUNCTION_BYTES = 2 * 1024 * 1024
+# Backends whose per-function rendering runs in a spawned worker so a hung
+# decompilation can be timed out. A worker reconstructs the session from the
+# binary path, so "binja" is deliberately excluded: it renders against a live
+# BinaryView / RPyc connection that cannot be pickled into a subprocess, and
+# must therefore stay on the in-process serial path (_render_serial).
 TIMEOUT_WORKER_BACKENDS = frozenset({"ida", "r2", "angr"})
 TREE_CALLING_CONVENTION_RX = re.compile(
     r"\b__(?:cdecl|fastcall|stdcall|thiscall|usercall|userpurge|noreturn)\b"
@@ -2051,6 +2056,11 @@ def _open_worker(spec: WorkerSpec):
 
         session = AngrSession(spec.binary)
         session.analyze()
+    elif spec.backend == "binja":
+        # Unreachable in practice: binja renders against a live, non-picklable
+        # session (parallel_safe=False and absent from TIMEOUT_WORKER_BACKENDS),
+        # so it never spawns a worker. Fail loudly if that invariant ever breaks.
+        raise RuntimeError("binja backend renders serially; workers unsupported")
     else:
         raise RuntimeError(f"unsupported backend for worker: {spec.backend}")
     session.ensure_decompiler()
