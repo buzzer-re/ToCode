@@ -153,7 +153,7 @@ threading.Thread(target=server.start, daemon=True).start()
 print("ToCode RPC server listening on 127.0.0.1:18812")
 ```
 
-It exposes the whole Binary Ninja Python VM with no authentication, so keep it bound to `127.0.0.1`. The [binja-headless](https://github.com/hugsy/binja-headless) plugin exposes the same interface if you prefer a packaged option. `rpyc` ships with ToCode, so nothing extra to install.
+It exposes the whole Binary Ninja Python VM with no authentication, so keep it bound to `127.0.0.1`. The [binja-headless](https://github.com/hugsy/binja-headless) plugin exposes the same interface if you prefer a packaged option.
 
 Then drive it from ToCode:
 
