@@ -3061,13 +3061,17 @@ def _relativize_sources(files: list[str]) -> dict[str, str]:
     for source_file in files:
         if os.path.isabs(source_file) and root:
             try:
-                result[source_file] = os.path.relpath(source_file, root)
+                # Emit POSIX separators so exports match across platforms
+                # (os.path.relpath yields backslashes on Windows).
+                result[source_file] = os.path.relpath(source_file, root).replace(
+                    os.sep, "/"
+                )
                 continue
             except ValueError:
                 pass
         result[source_file] = (
             source_file.lstrip("/") if os.path.isabs(source_file) else source_file
-        )
+        ).replace(os.sep, "/")
     return result
 
 

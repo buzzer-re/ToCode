@@ -152,10 +152,15 @@ def available_memory_mb() -> int | None:
     meminfo = _linux_mem_available_mb()
     if meminfo is not None:
         return meminfo
+    # os.sysconf is POSIX-only (absent on Windows); fetch it dynamically so the
+    # attribute access does not fail static analysis on Windows.
+    sysconf = getattr(os, "sysconf", None)
+    if sysconf is None:
+        return None
     try:
-        pages = os.sysconf("SC_AVPHYS_PAGES")
-        page_size = os.sysconf("SC_PAGE_SIZE")
-    except (AttributeError, OSError, ValueError):
+        pages = sysconf("SC_AVPHYS_PAGES")
+        page_size = sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError):
         return None
     if not isinstance(pages, int) or not isinstance(page_size, int):
         return None

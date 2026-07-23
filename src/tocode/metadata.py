@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 import re
 import tempfile
+import time
 from typing import Callable
 
 from .naming import SHARED_CLUSTER_ID, c_file_name, clean_path_component
@@ -756,6 +757,28 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
     write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=False) + "\n")
 
 
+_ATOMIC_REPLACE_ATTEMPTS = 10
+_ATOMIC_REPLACE_BASE_DELAY = 0.05  # seconds; ~2.75s worst case across attempts
+# Windows returns ERROR_ACCESS_DENIED (5) or ERROR_SHARING_VIOLATION (32) when
+# another process (antivirus, the search indexer, OneDrive) briefly holds the
+# destination or the temp file open without FILE_SHARE_DELETE at the instant of
+# the rename. These are transient, so retry before giving up.
+_TRANSIENT_REPLACE_WINERRORS = frozenset({5, 32})
+
+
+def _replace_with_retry(src: Path, dst: Path) -> None:
+    for attempt in range(_ATOMIC_REPLACE_ATTEMPTS):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError as exc:
+            # winerror is None off Windows, so other platforms re-raise at once.
+            transient = getattr(exc, "winerror", None) in _TRANSIENT_REPLACE_WINERRORS
+            if not transient or attempt == _ATOMIC_REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_ATOMIC_REPLACE_BASE_DELAY * (attempt + 1))
+
+
 def write_text_atomic(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -768,4 +791,9 @@ def write_text_atomic(path: Path, text: str) -> None:
     ) as handle:
         tmp_path = Path(handle.name)
         handle.write(text)
-    tmp_path.replace(path)
+    try:
+        _replace_with_retry(tmp_path, path)
+    except OSError:
+        # Do not leave the temp file behind when the replace ultimately fails.
+        tmp_path.unlink(missing_ok=True)
+        raise
