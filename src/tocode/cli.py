@@ -185,9 +185,6 @@ def main(argv: list[str] | None = None) -> int:
         else binary.parent / default_output_name(binary)
     )
     progress.set_log_path(log_root / "tocode.log")
-    progress.log(
-        f"Command: {' '.join(sys.argv if argv is None else ['tocode', *argv])}"
-    )
     started = time.monotonic()
     try:
         if not binary.is_file():
