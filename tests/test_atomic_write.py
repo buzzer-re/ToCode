@@ -107,16 +107,18 @@ def _open_read_share_no_delete(path: Path):
     until it is closed. Mirrors antivirus / OneDrive real-time access.
     """
     import ctypes
-    from ctypes import wintypes
 
     GENERIC_READ = 0x80000000
     FILE_SHARE_READ = 0x00000001
     OPEN_EXISTING = 3
     INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
-    CreateFileW = ctypes.windll.kernel32.CreateFileW
-    CreateFileW.restype = wintypes.HANDLE
-    handle = CreateFileW(
+    # windll is Windows-only (absent from the ctypes stubs on other platforms),
+    # so reach it dynamically to keep static analysis happy on the Linux CI. A
+    # HANDLE is a void*, so use c_void_p rather than the win-only wintypes.
+    kernel32 = getattr(ctypes, "windll").kernel32
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    handle = kernel32.CreateFileW(
         str(path),
         GENERIC_READ,
         FILE_SHARE_READ,  # deliberately no FILE_SHARE_DELETE
@@ -126,14 +128,14 @@ def _open_read_share_no_delete(path: Path):
         None,
     )
     if handle == INVALID_HANDLE_VALUE:
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise OSError(f"CreateFileW failed to lock {path}")
     return handle
 
 
 def _close_handle(handle) -> None:
     import ctypes
 
-    ctypes.windll.kernel32.CloseHandle(handle)
+    getattr(ctypes, "windll").kernel32.CloseHandle(handle)
 
 
 @_WINDOWS_ONLY
