@@ -1,6 +1,6 @@
 # ToCode
 
-ToCode exports a binary or IDA database into a source-like project tree: raw recovered C, matching assembly, function summaries, section data, optional IDA database, and metadata that coding agents can read directly.
+ToCode exports a binary, IDA database, or Android APK into a source-like project tree: raw recovered C (or Java for APKs), matching assembly, function summaries, section data, optional IDA database, and metadata that coding agents can read directly.
 
 ## Why
 
@@ -75,6 +75,23 @@ Three backends are supported, selected with `--backend` (default `auto`, which p
  4. **Binary Ninja**, is opt-in (`--backend binja`) and never chosen by `auto`, because it drives a running Binary Ninja instead of reading a file. See [Binary Ninja](#binary-ninja) below.
 
 Other disassemblers may be added in the future.
+
+### Android APKs
+
+`tocode app.apk` (also `.apks`/`.xapk` bundles) uses [ASC](https://github.com/MG1937/ASC) (`droidasc`, a core dependency) for the DEX side and the regular native backends for every shared object in the package:
+
+- `src/raw/<package>/<Class>.java`: one decompiled Java file per class, folders follow Java packages (no clustering, no summaries).
+- `AndroidManifest.xml` + `manifest.json`: decoded and parsed manifest (permissions, components with intent filters and exported state, application attributes, split manifests).
+- `classes.json`, `functions.json`, `function-index.json`, `strings.json`, `imports.json`, `exports.json` (exported components + JNI methods), `reachable.json` (from manifest components), `package-graph.json`, `sections.json`, `triage.json`.
+- `lib/<abi>/*.so`: every native library extracted; `native/<abi>/<lib>/`: a complete nested ToCode export per library (all ABIs), produced on a background thread while the DEX side decompiles. `native-libs.json` records the status of each (each library runs in its own process; one failing or being OOM-killed never fails the APK export, and the native thread waits for `TOCODE_APK_NATIVE_MIN_FREE_MB`, default 1024 MB, of free memory before each library). Pass `--no-native` to skip the native decompilation (libraries are still extracted). `--backend` picks the native backend (`auto`/`ida`/`r2`/`angr`; `binja` is not supported for APKs).
+- `data/apk/**`: every other APK entry verbatim; `data/res/**/*.xml` and `data/resources.json`: decoded binary XML and `resources.arsc`.
+
+`base.apk` automatically merges sibling `split_*.apk` files (config and ABI splits) into the same project; `--no-splits` exports it alone. The default output directory is `<manifest package>_decompiler`.
+
+```bash
+tocode base.apk                     # DEX + all splits + native libs (IDA/r2/angr)
+tocode app.apks --no-native -j 4    # bundle, DEX/Android side only
+```
 
 
 ### Using

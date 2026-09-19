@@ -7,6 +7,9 @@ import time
 from pathlib import Path
 
 from .analysis import create_analyzer
+from .apk import ApkExportOptions, export_apk
+from .apk_native import NativeOptions
+from .backends.asc import is_apk_input
 from .errors import ToCodeError
 from .exporter import export_binary
 from .naming import default_output_name
@@ -68,7 +71,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--backend",
         choices=("auto", "ida", "r2", "angr", "binja"),
         default=default_backend,
-        help="Decompiler backend: auto prefers IDA, then r2, then angr as a last-resort fallback; binja drives Binary Ninja and is opt-in (default: TOCODE_BACKEND or auto).",
+        help="Decompiler backend: auto prefers IDA, then r2, then angr as a last-resort fallback; binja drives Binary Ninja and is opt-in (default: TOCODE_BACKEND or auto). For APK input this selects the backend for the native .so libraries (binja is not supported there).",
+    )
+    parser.add_argument(
+        "--no-native",
+        action="store_true",
+        help="APK input: only export the DEX/Android side; native .so libraries are extracted but not decompiled.",
+    )
+    parser.add_argument(
+        "--no-splits",
+        action="store_true",
+        help="APK input: export base.apk alone instead of merging sibling split_*.apk files.",
     )
     parser.add_argument(
         "--binja-host",
@@ -169,6 +182,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.binja_view is not None and args.all_views:
         parser.error("--binja-view and --all-views cannot be combined")
     if args.backend == "binja":
+        if args.binary is not None and is_apk_input(args.binary):
+            parser.error(
+                "--backend binja is not supported for APK input; native libraries "
+                "use ida, r2, or angr"
+            )
         return _run_binja(args, progress, parser, argv)
 
     if args.binary is None:
@@ -179,6 +197,8 @@ def main(argv: list[str] | None = None) -> int:
     args.out_dir = (
         args.out_dir.expanduser().resolve() if args.out_dir is not None else None
     )
+    if is_apk_input(binary):
+        return _run_apk(binary, args=args, progress=progress, parser=parser)
     log_root = (
         args.out_dir
         if args.out_dir is not None
@@ -204,6 +224,55 @@ def main(argv: list[str] | None = None) -> int:
             f"Summary: functions={summary.function_count} "
             f"clusters={summary.cluster_count} failures={len(summary.failed_functions)}"
         )
+        print(f"Exported in {_format_duration(time.monotonic() - started)}")
+    return 0
+
+
+def _run_apk(
+    binary: Path,
+    *,
+    args: argparse.Namespace,
+    progress: Progress,
+    parser: argparse.ArgumentParser,
+) -> int:
+    if not binary.is_file():
+        parser.error(f"input must be a regular file: {binary}")
+    options = ApkExportOptions(
+        out_dir=args.out_dir,
+        jobs=args.jobs,
+        native=not args.no_native,
+        splits=not args.no_splits,
+        native_options=NativeOptions(
+            backend=args.backend,
+            analysis_command=args.analysis,
+            idadir=args.idadir,
+            ida_domain_path=args.ida_domain_path,
+            purge_cache=args.purge_cache,
+            jobs=args.jobs,
+            tree=args.tree,
+            entropy=args.entropy,
+        ),
+    )
+    started = time.monotonic()
+    try:
+        summary = export_apk(binary, options=options, progress=progress)
+    except KeyboardInterrupt:
+        progress.log("tocode: interrupted")
+        print("tocode: interrupted", file=sys.stderr)
+        return 130
+    except ToCodeError as exc:
+        progress.log(f"tocode: {exc}")
+        print(f"tocode: {exc}", file=sys.stderr)
+        return 1
+    if not args.quiet:
+        print(f"Project: {summary.root_dir}")
+        print(
+            f"Summary: package={summary.package} classes={summary.class_count} "
+            f"methods={summary.method_count} failures={len(summary.failed_classes)} "
+            f"natives={summary.native_done}/{summary.native_total}"
+        )
+        for line in summary.native_errors:
+            print(f"native: {line}", file=sys.stderr)
         print(f"Exported in {_format_duration(time.monotonic() - started)}")
     return 0
 

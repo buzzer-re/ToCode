@@ -263,3 +263,19 @@ class ExportSummary:
     tree_function_index_path: Path | None = None
     manifest_path: Path | None = None
     data_dir: Path | None = None
+
+
+@dataclass(slots=True)
+class ApkExportSummary:
+    root_dir: Path
+    package: str
+    apks: list[Path]
+    class_count: int
+    method_count: int
+    source_files: list[Path]
+    failed_classes: list[tuple[str, str]]
+    native_total: int
+    native_done: int
+    native_errors: list[str] = field(default_factory=list)
+    manifest_path: Path | None = None
+    seconds: float = 0.0
