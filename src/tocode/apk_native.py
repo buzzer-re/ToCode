@@ -42,7 +42,11 @@ NATIVE_LOG_TAIL_SECONDS = 0.5
 NATIVE_HEARTBEAT_SECONDS = 20.0
 _LOG_TIMESTAMP_RX = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\s+")
 _RENDER_TOTAL_RX = re.compile(r"Rendering and writing (\d+) functions")
-_FUNCTION_LINE_RX = re.compile(r"^export \S+ 0x[0-9a-f]+ - ")
+# Per-function render lines: "export <name> 0x<addr> - <n> bytes done|failed: ...".
+# The parent also logs a bare "export <name> 0x<addr> - <n> bytes" when it hands a
+# function to a worker; only completed ones count toward the bar.
+_FUNCTION_LINE_RX = re.compile(r"^export \S+ 0x[0-9a-f]+ - \d+ bytes (done|failed)")
+_FUNCTION_START_RX = re.compile(r"^export \S+ 0x[0-9a-f]+ - \d+ bytes$")
 KNOWN_ABIS = ("arm64-v8a", "armeabi-v7a", "armeabi", "x86_64", "x86", "mips", "mips64")
 
 
@@ -62,6 +66,8 @@ class NativeLib:
     failure_count: int | None = None
     status: str = "pending"
     seconds: float | None = None
+    # Package of the APK the library was extracted from (for the nested AGENTS.md).
+    package: str = ""
 
     @property
     def stem(self) -> str:
@@ -134,6 +140,21 @@ def native_export_dir(root: Path, lib: NativeLib) -> Path:
 NativeExporter = Callable[[NativeLib, Path, Progress], tuple[str, str, int, int]]
 
 
+def describe_origin(lib: NativeLib) -> str:
+    """Provenance paragraph for the nested export's AGENTS.md."""
+    package = f"`{lib.package}`" if lib.package else "an Android app"
+    return (
+        f"This is a decompiled native library from the {package} APK: "
+        f"`{lib.name}` ({lib.abi}, `{lib.entry}` in `{lib.source_apk}`, "
+        f"sha256 `{lib.sha256}`). "
+        "The APK export that owns it is three directories up (`../../..`): its "
+        "`exports.json` and `triage.json` list the Java `native` methods with the "
+        "`Java_<package>_<Class>_<method>` JNI symbols this library is expected to "
+        "export, `native-libs.json` lists the other libraries of the app, and "
+        "`src/raw/<package>/` holds the decompiled Java that calls into this code."
+    )
+
+
 def run_native_export(
     lib: NativeLib, out_dir: Path, options: NativeOptions, progress: Progress
 ) -> tuple[str, str, int, int]:
@@ -157,6 +178,7 @@ def run_native_export(
             jobs=options.jobs,
             tree=options.tree,
             entropy=options.entropy,
+            origin=describe_origin(lib),
         )
         return (
             analyzer.backend_name,
@@ -380,6 +402,8 @@ class NestedLogTail:
             self.rendered += 1
             if self._bar is not None:
                 self._bar.update(1)
+            return
+        if _FUNCTION_START_RX.match(line):
             return
         self.last_line = line
         total = _RENDER_TOTAL_RX.search(line)

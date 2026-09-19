@@ -878,6 +878,7 @@ def test_nested_log_tail_mirrors_lines_and_counts_functions(tmp_path: Path) -> N
         )
         handle.write("2026-09-19T20:41:15 export sub_1000 0x1000 - 10 bytes done\n")
         handle.write("2026-09-19T20:41:15 export sub_2000 0x2000 - 10 bytes done\n")
+        handle.write("2026-09-19T20:41:15 export sub_3000 0x3000 - 10 bytes\n")  # start
         handle.write("plain backend stderr line\n")
         handle.write("2026-09-19T20:41:16 partial line without newline")
     tail.stop()
@@ -889,6 +890,9 @@ def test_nested_log_tail_mirrors_lines_and_counts_functions(tmp_path: Path) -> N
     assert "native[libfoo.so]: Rendering and writing 3 functions" in mirrored
     assert "native[libfoo.so]: plain backend stderr line" in mirrored
     assert "export sub_1000" not in mirrored  # per-function lines feed the bar only
+    assert (
+        "export sub_3000" not in mirrored
+    )  # start lines are neither counted nor shown
     assert "partial line" not in mirrored
 
 
@@ -934,3 +938,52 @@ def test_native_runner_describe_current_reports_progress(tmp_path: Path) -> None
     assert status.startswith("native: libfoo.so (arm64-v8a) 0/5 functions")
     assert "0/1 libraries finished" in status
     assert runner.describe_current() is None
+
+
+def test_describe_origin_names_the_apk_package(tmp_path: Path) -> None:
+    from tocode.apk_native import describe_origin
+
+    lib = NativeLib(
+        "arm64-v8a",
+        "libfoo.so",
+        "lib/arm64-v8a/libfoo.so",
+        "base.apk",
+        1,
+        "abc",
+        tmp_path / "libfoo.so",
+        package="com.example.app",
+    )
+
+    text = describe_origin(lib)
+
+    assert text.startswith(
+        "This is a decompiled native library from the `com.example.app` APK: "
+        "`libfoo.so` (arm64-v8a, `lib/arm64-v8a/libfoo.so` in `base.apk`, sha256 `abc`)."
+    )
+    assert "Java_<package>_<Class>_<method>" in text
+    assert "an Android app" in describe_origin(
+        NativeLib("x86", "l.so", "lib/x86/l.so", "a.apk", 1, "h", tmp_path / "l.so")
+    )
+
+
+def test_export_apk_tags_native_libs_with_the_package(
+    tmp_path: Path, fake_backend: None
+) -> None:
+    apk = _build_apk(tmp_path / "base.apk")
+    seen: list[str] = []
+
+    def exporter(
+        lib: NativeLib, out_dir: Path, progress: Progress
+    ) -> tuple[str, str, int, int]:
+        seen.append(lib.package)
+        return ("r2", "radare2 pdc", 1, 0)
+
+    export_apk(
+        apk,
+        options=ApkExportOptions(out_dir=tmp_path / "export", jobs=1),
+        progress=Progress(enabled=False),
+        native_exporter=exporter,
+        decompiler_factory=FakeDecompiler,
+    )
+
+    assert seen == ["com.example.app"] * 3

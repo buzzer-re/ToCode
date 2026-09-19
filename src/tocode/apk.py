@@ -289,6 +289,7 @@ def _extract_entries(context: ApkContext) -> None:
     context.entries = entries
     context.libs = extract_native_libs(apk_set.apks, root, sha256=sha256_file)
     for lib in context.libs:
+        lib.package = context.package
         for entry in entries:
             if entry.name == lib.entry and entry.apk == lib.source_apk:
                 entry.exported_path = lib.path.relative_to(root).as_posix()
