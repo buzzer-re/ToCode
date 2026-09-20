@@ -9,6 +9,7 @@ description = "Export compiled binaries as source-like projects for reverse engi
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "droidasc==0.1.1.post1",
   "ida-domain==0.5.0",
   "idapro==0.0.9",
   "r2pipe==1.9.8",
@@ -57,6 +58,11 @@ ignore_missing_imports = true
 # type checking environment. Ignore its missing imports.
 [[tool.mypy.overrides]]
 module = ["binaryninja.*"]
+ignore_missing_imports = true
+
+# droidasc (ASC, the APK backend) and androguard ship no type stubs.
+[[tool.mypy.overrides]]
+module = ["droidasc.*", "androguard.*"]
 ignore_missing_imports = true
 
 [tool.setuptools]

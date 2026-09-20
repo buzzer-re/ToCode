@@ -532,6 +532,9 @@ class ExportContext:
     tree_enabled: bool
     entropy_enabled: bool = False
     restart: bool = False
+    # Free-form provenance shown at the top of the generated AGENTS.md (e.g. a
+    # native library extracted from an APK export).
+    origin: str | None = None
     analysis: ProgramAnalysis | None = None
     root: Path | None = None
     raw_dir: Path | None = None
@@ -592,6 +595,7 @@ def export_binary(
     tree: bool = False,
     entropy: bool = False,
     restart: bool = False,
+    origin: str | None = None,
 ) -> ExportSummary:
     progress = progress or analyzer.progress
     context = ExportContext(
@@ -602,6 +606,7 @@ def export_binary(
         tree_enabled=tree,
         entropy_enabled=entropy,
         restart=restart,
+        origin=origin,
     )
     try:
         _prepare_tree(context)
@@ -2514,7 +2519,10 @@ def _write_metadata(context: ExportContext) -> None:
         write_text_atomic(
             root / "AGENTS.md",
             build_export_agents(
-                analysis, context.header_name, tree_enabled=context.tree_enabled
+                analysis,
+                context.header_name,
+                tree_enabled=context.tree_enabled,
+                origin=context.origin,
             ),
         )
         write_text_atomic(root / "CLAUDE.md", "@./AGENTS.md\n")
@@ -2897,7 +2905,11 @@ def write_manifest(context: ExportContext) -> Path:
 
 
 def build_export_agents(
-    analysis: ProgramAnalysis, header_name: str, *, tree_enabled: bool = True
+    analysis: ProgramAnalysis,
+    header_name: str,
+    *,
+    tree_enabled: bool = True,
+    origin: str | None = None,
 ) -> str:
     section_files = sorted(
         [
@@ -2916,6 +2928,7 @@ def build_export_agents(
         "You are working inside a ToCode binary export.",
         "Treat the recovered source, assembly, metadata, and raw section data as evidence for reverse engineering.",
         "",
+        *(["## Origin", "", origin, ""] if origin else []),
         "## Mission",
         "",
         "Reverse the binary, answer user questions, or serve as an oracle/helper to the user regarding this recovered source code.",

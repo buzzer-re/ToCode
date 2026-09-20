@@ -1258,3 +1258,16 @@ def test_tree_safe_function_preserves_scanner_calls() -> None:
     assert "strcpy(dest, a1);" in tree_source
     assert "strcpy__GLIBC_2_17" not in tree_source
     assert "return 0LL;" in tree_source
+
+
+def test_build_export_agents_includes_origin_section() -> None:
+    from tocode.exporter import build_export_agents
+
+    analysis = _single_routine_analysis()
+    with_origin = build_export_agents(
+        analysis, "sample.h", tree_enabled=False, origin="From the `com.x` APK."
+    )
+    without = build_export_agents(analysis, "sample.h", tree_enabled=False)
+
+    assert "## Origin\n\nFrom the `com.x` APK.\n\n## Mission" in with_origin
+    assert "## Origin" not in without

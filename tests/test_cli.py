@@ -40,3 +40,58 @@ def test_parser_uses_entropy_as_opt_in_flag() -> None:
 
     assert parser.parse_args(["sample.bin"]).entropy is False
     assert parser.parse_args(["--entropy", "sample.bin"]).entropy is True
+
+
+def test_parser_has_apk_flags() -> None:
+    parser = build_parser()
+
+    default_args = parser.parse_args(["app.apk"])
+    apk_args = parser.parse_args(["--no-native", "--no-splits", "app.apk"])
+
+    assert default_args.no_native is False and default_args.no_splits is False
+    assert apk_args.no_native is True and apk_args.no_splits is True
+
+
+def test_main_rejects_binja_backend_for_apk_input(tmp_path) -> None:
+    from tocode.cli import main
+
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+
+    with pytest.raises(SystemExit) as info:
+        main(["--backend", "binja", str(apk)])
+
+    assert info.value.code == 2
+
+
+def test_main_routes_apk_input_to_apk_export(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from tocode import cli
+
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    seen = {}
+
+    def fake_export(binary, *, options, progress):
+        seen["binary"] = binary
+        seen["options"] = options
+        return SimpleNamespace(
+            root_dir=tmp_path / "out",
+            package="com.example",
+            class_count=1,
+            method_count=2,
+            failed_classes=[],
+            native_total=1,
+            native_done=1,
+            native_errors=[],
+        )
+
+    monkeypatch.setattr(cli, "export_apk", fake_export)
+
+    assert cli.main(["--no-native", "-j", "3", "--backend", "r2", "-q", str(apk)]) == 0
+    assert seen["binary"] == apk.resolve()
+    assert seen["options"].native is False
+    assert seen["options"].jobs == 3
+    assert seen["options"].native_options.backend == "r2"
+    assert seen["options"].native_options.jobs == 3
