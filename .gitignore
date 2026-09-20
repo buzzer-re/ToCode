@@ -8,3 +8,5 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 *_decompiler/
+/dist
+/build
