@@ -23,11 +23,22 @@ sample_decompiler/
   src/raw/**/*.c
   src/raw/**/*.asm
   src/raw/**/*.summary
+  src/raw/<package>/**/*.java      # Only for APK files (replaces the .c/.asm/.summary tree)
   include/*.h
   include/*.types.h
   data/*.bin
   data/variables.json
   data/variables_interesting.json
+  data/apk/<apk>/**                # Only for APK files: every non-code APK entry, verbatim
+  data/res/<apk>/**/*.xml          # Only for APK files: binary XML resources decoded to text
+  data/resources.json              # Only for APK files: decoded resources.arsc
+  lib/<abi>/*.so                   # Only for APK files: extracted native libraries
+  native/<abi>/<lib>/              # Only for APK files: full nested ToCode export per .so
+  AndroidManifest.xml              # Only for APK files
+  manifest.json                    # Only for APK files
+  classes.json                     # Only for APK files
+  package-graph.json               # Only for APK files (replaces cluster-graph.json)
+  native-libs.json                 # Only for APK files
   function-index.json
   functions.json
   types.json
@@ -47,11 +58,19 @@ sample_decompiler/
 | Path | Description |
 | --- | --- |
 | `src/raw` | Decompiled C-like output, assembly, and summaries. Grouped by call-graph cluster, or by the original source file/directory when the binary has debug info (DWARF). |
-| `include` | Generated headers, including `*.types.h` with the structs/enums/typedefs recovered from the binary. |
+| `src/raw/<package>/**/*.java` | **Only for APK files.** Decompiled Java (ASC + androguard DAD), one file per class, folders follow Java packages; inner classes are `Outer$Inner.java`. No clustering, no `.summary` files. |
+| `include` | Generated headers, including `*.types.h` with the structs/enums/typedefs recovered from the binary. Not written for APK files. |
 | `data` | Raw section dumps and variable metadata. |
+| `data/apk`, `data/res`, `data/resources.json` | **Only for APK files.** Every non-code entry of each APK in the set verbatim, `res/**/*.xml` decoded from binary XML, and the decoded `resources.arsc` tables. |
+| `lib/<abi>/*.so` | **Only for APK files.** Every native library found in the APK set (all ABIs), always extracted. |
+| `native/<abi>/<lib>/` | **Only for APK files.** A complete nested ToCode export for each native library (own `AGENTS.md` with an Origin section naming the APK, `src/raw/*.c`, `functions.json`, `exports.json`, ...). Skipped with `--no-native`. |
+| `AndroidManifest.xml` / `manifest.json` | **Only for APK files.** Decoded manifest and its parsed form: package, versions, SDKs, permissions, components with intent filters and exported state, application attributes, split manifests. |
+| `classes.json` | **Only for APK files.** Every class with superclass, interfaces, access flags, fields, methods, source file, and Java file/line ranges. |
+| `package-graph.json` | **Only for APK files.** Inter-package call graph (the APK counterpart of `cluster-graph.json`). |
+| `native-libs.json` | **Only for APK files.** ABI, hash, source APK, export directory, and decompilation status of every native library. |
 | `types.json` | Catalog of types recovered from the binary's debug info or type library, with C declarations. |
-| `*.json` | Functions (with recovered types and original source decl file/line), sections, strings, imports, exports, relocations, reachability, clusters, triage, project metadata, and export manifest. |
-| `tocode.log` | Export log with checkpoint, resume, and per-function render history. |
+| `*.json` | Functions (with recovered types and original source decl file/line), sections, strings, imports, exports, relocations, reachability, clusters, triage, project metadata, and export manifest. For APK files the same documents describe DEX methods, strings, framework imports, exported components/JNI methods, and reachability from manifest components; `relocations.json`, `cluster-graph.json`, and `types.json` are not written. |
+| `tocode.log` | Export log with checkpoint, resume, and per-function render history. For APK files it also carries the native library export status. |
 | `AGENTS.md` / `CLAUDE.md` | Instructions for agents analyzing the exported binary. |
 | `src/tree` | Optional scanner-friendly C output when `--tree` is used. |
 
