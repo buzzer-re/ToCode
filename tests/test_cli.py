@@ -95,3 +95,21 @@ def test_main_routes_apk_input_to_apk_export(tmp_path, monkeypatch) -> None:
     assert seen["options"].jobs == 3
     assert seen["options"].native_options.backend == "r2"
     assert seen["options"].native_options.jobs == 3
+
+
+def test_package_installs_a_tocode_console_script() -> None:
+    """The PyPI distribution is `tocode-cli`, but the command stays `tocode`."""
+    import importlib.metadata as metadata
+
+    try:
+        distribution = metadata.distribution("tocode-cli")
+    except metadata.PackageNotFoundError:  # pragma: no cover - not installed
+        pytest.skip("tocode-cli is not installed in this environment")
+
+    scripts = {
+        entry.name: entry.value
+        for entry in distribution.entry_points
+        if entry.group == "console_scripts"
+    }
+
+    assert scripts == {"tocode": "tocode.cli:main"}
