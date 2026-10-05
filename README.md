@@ -246,22 +246,4 @@ export_from_binaryview(bv, "out/")
 
 ## Development
 
-This tool was built using agentic coding, so if you plan to help, I strongly advise doing the same.
-
-Before changing ToCode, have Python, uv, ruff, mypy, pytest, and compileall available. For backend work, also have IDA or radare2 installed, depending on what you are touching.
-
-The main instructions for agents are in `AGENTS.md`. Read it before starting, and make sure the local quality gate passes before proceeding.
-
-### Quality Gate
-
-Run the local CI gate before opening a PR:
-
-```bash
-./ci-local.sh
-```
-
-On Windows PowerShell:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\ci-local.ps1
-```
+See [DEVELOPMENT.md](DEVELOPMENT.md) for setup, tests, the local quality gate, and release steps.
