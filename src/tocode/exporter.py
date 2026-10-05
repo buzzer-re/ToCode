@@ -43,6 +43,7 @@ from .naming import (
     SHARED_CLUSTER_ID,
     NameBook,
     asm_file_name,
+    bounded_path_component,
     build_name_book,
     c_file_name,
     clean_c_identifier,
@@ -265,7 +266,7 @@ class CheckpointStore:
     def cluster_record_path(self, cluster: Cluster) -> Path:
         return (
             self.clusters_dir
-            / f"{cluster.root:016x}_{clean_path_component(cluster.label)}.json"
+            / f"{cluster.root:016x}_{bounded_path_component(cluster.label)}.json"
         )
 
     def load_cluster_record(self, cluster: Cluster) -> dict[str, Any] | None:

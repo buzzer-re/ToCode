@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 from pathlib import Path
 import re
 
@@ -24,6 +25,24 @@ def clean_path_component(value: str) -> str:
     return "".join(parts).strip("_") or "unnamed"
 
 
+# Filesystems cap a name at 255 bytes; leave room for prefixes and suffixes
+# such as "<address>_" and ".json.<random>.tmp".
+MAX_NAME_COMPONENT = 120
+
+
+def bounded_path_component(value: str, limit: int = MAX_NAME_COMPONENT) -> str:
+    """``clean_path_component`` capped at ``limit`` chars, kept unique by a hash.
+
+    Mangled names (NativeAOT generics, C++ templates) can run to hundreds of
+    characters, longer than a single path component may be.
+    """
+    cleaned = clean_path_component(value)
+    if len(cleaned) <= limit:
+        return cleaned
+    digest = hashlib.sha1(value.encode("utf-8", "surrogatepass")).hexdigest()[:10]
+    return f"{cleaned[: limit - 11]}_{digest}"
+
+
 def clean_c_identifier(value: str) -> str:
     text = _IDENT_BAD.sub("_", value)
     if not re.search(r"[0-9A-Za-z_]", text):
@@ -37,7 +56,7 @@ def default_output_name(binary: Path) -> str:
 
 def c_file_name(cluster: Cluster) -> str:
     if cluster.file_base:
-        return f"{clean_path_component(cluster.file_base)}.c"
+        return f"{bounded_path_component(cluster.file_base)}.c"
     if cluster.root == SHARED_CLUSTER_ID:
         return "utils.c"
     return f"cluster_{cluster.root:016x}.c"

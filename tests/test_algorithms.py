@@ -275,3 +275,21 @@ def test_r2_decompiler_probe_reports_missing_sleigh() -> None:
 
     with pytest.raises(BackendError, match="r2ghidra SLEIGH languages"):
         session.ensure_decompiler()
+
+
+def test_bounded_path_component_caps_long_mangled_names() -> None:
+    from tocode.naming import MAX_NAME_COMPONENT, bounded_path_component
+
+    short = bounded_path_component("sub_1000")
+    long_name = (
+        "S_P_CoreLib_System_Collections_Generic_Dictionary_2<"
+        + "Int32__" * 60
+        + ">__TryInsert"
+    )
+    first = bounded_path_component(long_name)
+    second = bounded_path_component(long_name + "_other")
+
+    assert short == "sub_1000"
+    assert len(first) == MAX_NAME_COMPONENT and len(second) == MAX_NAME_COMPONENT
+    assert first != second  # the hash keeps distinct long names distinct
+    assert first.startswith("S_P_CoreLib_System_Collections_Generic_Dictionary_2_")
