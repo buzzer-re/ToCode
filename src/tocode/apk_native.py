@@ -68,6 +68,9 @@ class NativeLib:
     seconds: float | None = None
     # Package of the APK the library was extracted from (for the nested AGENTS.md).
     package: str = ""
+    # Full provenance paragraph for the nested AGENTS.md; overrides the APK text
+    # (used when the library comes from a .NET bundle, package, or assembly).
+    origin: str | None = None
 
     @property
     def stem(self) -> str:
@@ -140,8 +143,22 @@ def native_export_dir(root: Path, lib: NativeLib) -> Path:
 NativeExporter = Callable[[NativeLib, Path, Progress], tuple[str, str, int, int]]
 
 
+def native_min_free_mb() -> int:
+    """Free-memory floor before each native export (0 disables the wait)."""
+    for name in ("TOCODE_NATIVE_MIN_FREE_MB", "TOCODE_APK_NATIVE_MIN_FREE_MB"):
+        raw = os.environ.get(name, "").strip()
+        if raw:
+            try:
+                return max(0, int(raw))
+            except ValueError:
+                continue
+    return DEFAULT_NATIVE_MIN_FREE_MB
+
+
 def describe_origin(lib: NativeLib) -> str:
     """Provenance paragraph for the nested export's AGENTS.md."""
+    if lib.origin:
+        return lib.origin
     package = f"`{lib.package}`" if lib.package else "an Android app"
     return (
         f"This is a decompiled native library from the {package} APK: "
@@ -451,11 +468,20 @@ class NativeRunner:
     max_wait_seconds: float = NATIVE_MEMORY_MAX_WAIT_SECONDS
     mirror_logs: bool = True
     current: NativeLib | None = None
+    waiting: tuple[NativeLib, int] | None = None
     current_started: float = 0.0
     current_tail: NestedLogTail | None = None
 
     def describe_current(self) -> str | None:
         """One line about what the native thread is doing right now."""
+        waiting = self.waiting
+        if waiting is not None:
+            pending, available = waiting
+            return (
+                f"native: waiting for memory before {pending.name} ({pending.abi}): "
+                f"{available} MB free, need {self.min_free_mb} MB "
+                "(set TOCODE_NATIVE_MIN_FREE_MB to change)"
+            )
         lib = self.current
         if lib is None:
             return None
@@ -502,6 +528,7 @@ class NativeRunner:
             available = self.available_memory()
             if available is None or available >= self.min_free_mb:
                 break
+            self.waiting = (lib, available)
             if not logged:
                 self.progress.log(
                     f"native: waiting for memory before {lib.name} ({lib.abi}): "
@@ -510,6 +537,7 @@ class NativeRunner:
                 logged = True
             self.stop_event.wait(self.poll_seconds)
             waited += self.poll_seconds
+        self.waiting = None
         if logged and not self.stop_event.is_set():
             self.progress.file_log(
                 f"native: waited {waited:.0f}s for memory before {lib.name}"

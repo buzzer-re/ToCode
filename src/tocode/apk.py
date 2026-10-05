@@ -24,7 +24,6 @@ import zipfile
 from . import __version__
 from . import apk_metadata as meta
 from .apk_native import (
-    DEFAULT_NATIVE_MIN_FREE_MB,
     NATIVE_HEARTBEAT_SECONDS,
     NativeExporter,
     NativeLib,
@@ -34,6 +33,7 @@ from .apk_native import (
     default_native_exporter,
     extract_native_libs,
     native_libs_json,
+    native_min_free_mb,
 )
 from .backends.asc import (
     ApkSet,
@@ -344,7 +344,7 @@ def _start_native(context: ApkContext, exporter: NativeExporter | None) -> None:
         root=root,
         progress=context.progress,
         exporter=exporter or default_native_exporter(context.options.native_options),
-        min_free_mb=_native_min_free_mb(),
+        min_free_mb=native_min_free_mb(),
         available_memory=available_memory_mb,
     )
     context.progress.log(
@@ -353,16 +353,6 @@ def _start_native(context: ApkContext, exporter: NativeExporter | None) -> None:
     )
     runner.start()
     context.native_runner = runner
-
-
-def _native_min_free_mb() -> int:
-    raw = os.environ.get("TOCODE_APK_NATIVE_MIN_FREE_MB", "").strip()
-    if raw:
-        try:
-            return max(0, int(raw))
-        except ValueError:
-            pass
-    return DEFAULT_NATIVE_MIN_FREE_MB
 
 
 def _join_native(context: ApkContext) -> None:

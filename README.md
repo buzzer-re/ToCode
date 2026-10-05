@@ -1,6 +1,6 @@
 # ToCode
 
-ToCode exports a binary, IDA database, or Android APK into a source-like project tree: raw recovered C (or Java for APKs), matching assembly, function summaries, section data, optional IDA database, and metadata that coding agents can read directly.
+ToCode exports a binary, IDA database, Android APK, or .NET assembly into a source-like project tree: raw recovered C (Java for APKs, C# and IL for .NET), matching assembly, function summaries, section data, optional IDA database, and metadata that coding agents can read directly.
 
 ## Why
 
@@ -24,6 +24,10 @@ sample_decompiler/
   src/raw/**/*.asm
   src/raw/**/*.summary
   src/raw/<package>/**/*.java      # Only for APK files (replaces the .c/.asm/.summary tree)
+  src/raw/<Assembly>/<Namespace>/**/*.cs   # Only for .NET files (replaces the .c/.asm/.summary tree)
+  src/raw/<Assembly>/<Namespace>/**/*.il   # Only for .NET files: IL with RVA + raw bytecode per instruction
+  src/raw/<Assembly>/Properties/*  # Only for .NET files: AssemblyInfo.cs and the Manifest.il
+  src/raw/<Assembly>/*.csproj      # Only for .NET files: recovered project file
   include/*.h
   include/*.types.h
   data/*.bin
@@ -32,13 +36,19 @@ sample_decompiler/
   data/apk/<apk>/**                # Only for APK files: every non-code APK entry, verbatim
   data/res/<apk>/**/*.xml          # Only for APK files: binary XML resources decoded to text
   data/resources.json              # Only for APK files: decoded resources.arsc
-  lib/<abi>/*.so                   # Only for APK files: extracted native libraries
-  native/<abi>/<lib>/              # Only for APK files: full nested ToCode export per .so
+  data/resources/<Assembly>/*      # Only for .NET files: embedded resources (.resources decoded to JSON)
+  data/assemblies/*                # Only for .NET files: assemblies extracted from bundles/packages
+  lib/<abi>/*.so                   # Only for APK and .NET files: extracted native libraries
+  native/<abi>/<lib>/              # Only for APK and .NET files: full nested ToCode export per native library
   AndroidManifest.xml              # Only for APK files
   manifest.json                    # Only for APK files
   classes.json                     # Only for APK files
   package-graph.json               # Only for APK files (replaces cluster-graph.json)
-  native-libs.json                 # Only for APK files
+  native-libs.json                 # Only for APK and .NET files
+  assemblies.json                  # Only for .NET files
+  namespace-graph.json             # Only for .NET files (replaces cluster-graph.json)
+  resources.json                   # Only for .NET files
+  container.json                   # Only for .NET files: bundle / NuGet package layout
   function-index.json
   functions.json
   types.json
@@ -62,14 +72,19 @@ sample_decompiler/
 | `include` | Generated headers, including `*.types.h` with the structs/enums/typedefs recovered from the binary. Not written for APK files. |
 | `data` | Raw section dumps and variable metadata. |
 | `data/apk`, `data/res`, `data/resources.json` | **Only for APK files.** Every non-code entry of each APK in the set verbatim, `res/**/*.xml` decoded from binary XML, and the decoded `resources.arsc` tables. |
-| `lib/<abi>/*.so` | **Only for APK files.** Every native library found in the APK set (all ABIs), always extracted. |
-| `native/<abi>/<lib>/` | **Only for APK files.** A complete nested ToCode export for each native library (own `AGENTS.md` with an Origin section naming the APK, `src/raw/*.c`, `functions.json`, `exports.json`, ...). Skipped with `--no-native`. |
+| `src/raw/<Assembly>/<Namespace>/**/*.cs` and `*.il` | **Only for .NET files.** Decompiled C# (ICSharpCode.Decompiler) and IL disassembly (RVA, raw bytecode, metadata tokens) per top-level type, nested types inside, folders follow assemblies and namespaces like a dnSpy/ILSpy project export. `Properties/AssemblyInfo.cs`, `Properties/Manifest.il`, and a `<Assembly>.csproj` per assembly. |
+| `data/resources/<Assembly>`, `data/assemblies` | **Only for .NET files.** Embedded resources (`.resources` decoded to JSON) and the assemblies extracted from single-file bundles or NuGet packages. |
+| `lib/<abi>/*.so` | **Only for APK and .NET files.** Every native library found (APK: all ABIs; .NET: mixed-mode code, bundled libraries, P/Invoke targets next to the input), always extracted. |
+| `native/<abi>/<lib>/` | **Only for APK and .NET files.** A complete nested ToCode export for each native library (own `AGENTS.md` with an Origin section naming the APK or .NET program, `src/raw/*.c`, `functions.json`, `exports.json`, ...). Skipped with `--no-native`. |
 | `AndroidManifest.xml` / `manifest.json` | **Only for APK files.** Decoded manifest and its parsed form: package, versions, SDKs, permissions, components with intent filters and exported state, application attributes, split manifests. |
 | `classes.json` | **Only for APK files.** Every class with superclass, interfaces, access flags, fields, methods, source file, and Java file/line ranges. |
 | `package-graph.json` | **Only for APK files.** Inter-package call graph (the APK counterpart of `cluster-graph.json`). |
-| `native-libs.json` | **Only for APK files.** ABI, hash, source APK, export directory, and decompilation status of every native library. |
+| `native-libs.json` | **Only for APK and .NET files.** ABI/arch, hash, source, export directory, and decompilation status of every native library. |
+| `assemblies.json` | **Only for .NET files.** Every assembly found: version, target framework, entry point, CLR flags, ReadyToRun/mixed-mode, references, resources, obfuscation hints, and why skipped ones were not decompiled. |
+| `namespace-graph.json` | **Only for .NET files.** Inter-namespace and inter-assembly call graph (the .NET counterpart of `cluster-graph.json`). |
+| `resources.json` / `container.json` | **Only for .NET files.** Embedded/linked resources index; layout of the bundle, package, or assembly and where each entry was extracted. |
 | `types.json` | Catalog of types recovered from the binary's debug info or type library, with C declarations. |
-| `*.json` | Functions (with recovered types and original source decl file/line), sections, strings, imports, exports, relocations, reachability, clusters, triage, project metadata, and export manifest. For APK files the same documents describe DEX methods, strings, framework imports, exported components/JNI methods, and reachability from manifest components; `relocations.json`, `cluster-graph.json`, and `types.json` are not written. |
+| `*.json` | Functions (with recovered types and original source decl file/line), sections, strings, imports, exports, relocations, reachability, clusters, triage, project metadata, and export manifest. For APK files the same documents describe DEX methods, strings, framework imports, exported components/JNI methods, and reachability from manifest components; `relocations.json`, `cluster-graph.json`, and `types.json` are not written. For .NET files they describe methods (address `<Assembly>!0x<token>`, C# and IL line ranges), the user-string heap, cross-assembly and P/Invoke imports, entry points/public API, and `types.json` lists .NET types with members; `relocations.json` and `cluster-graph.json` are not written. |
 | `tocode.log` | Export log with checkpoint, resume, and per-function render history. For APK files it also carries the native library export status. |
 | `AGENTS.md` / `CLAUDE.md` | Instructions for agents analyzing the exported binary. |
 | `src/tree` | Optional scanner-friendly C output when `--tree` is used. |
@@ -95,6 +110,23 @@ Three backends are supported, selected with `--backend` (default `auto`, which p
 
 Other disassemblers may be added in the future.
 
+### .NET assemblies
+
+`tocode App.dll` (also `.exe`, an apphost launcher next to its `.dll`, single-file bundles, and `.nupkg` packages) uses a built-in .NET backend: [dnlib](https://github.com/0xd4d/dnlib) for metadata and [ICSharpCode.Decompiler](https://github.com/icsharpcode/ILSpy) (ILSpy's engine) for C#, both bundled with ToCode and loaded through [pythonnet](https://pypi.org/project/pythonnet/). No dnSpy/ILSpy install is needed; only a **.NET 9+ runtime** (e.g. `sudo apt install dotnet-runtime-10.0`, or the SDK; `DOTNET_ROOT` is honoured).
+
+- `src/raw/<Assembly>/<Namespace>/.../<Type>.cs`: C# per top-level type, folders follow assemblies and namespaces like a dnSpy/ILSpy project export; `<Type>.il` next to it keeps the bytecode (IL with RVA, raw bytes, and metadata tokens per instruction).
+- Per-method C# and IL line ranges in `functions.json`/`function-index.json` (address `<Assembly>!0x<token>`), with lambdas and async/iterator state machines linked to the method that owns them.
+- `assemblies.json`, `types.json`, `strings.json` (user strings with `ldstr` xrefs), `imports.json` (cross-assembly members and P/Invoke), `exports.json`, `reachable.json`, `namespace-graph.json`, `resources.json`, `container.json`, `triage.json` (P/Invoke, suspicious API families, obfuscation hints, strings of interest).
+- Native code goes through the regular native backends on a background thread, like APK `.so` files: mixed-mode (C++/CLI) assemblies, native libraries inside bundles/packages, and P/Invoke targets shipped next to the input. `--no-native` skips it.
+- Single-file bundles and packages carry the .NET runtime/framework; those assemblies and runtime native libraries are listed but only decompiled with `--include-framework`. NuGet packages decompile each assembly once, from its newest target framework.
+- `--as-native` exports a managed PE with the native backend instead (e.g. to look at a ReadyToRun or mixed-mode image in IDA).
+
+```bash
+tocode App.dll                      # assembly (+ P/Invoke libraries next to it)
+tocode publish/App                  # single-file bundle or apphost launcher
+tocode Vendor.Lib.1.0.0.nupkg       # NuGet package
+```
+
 ### Android APKs
 
 `tocode app.apk` (also `.apks`/`.xapk` bundles) uses [ASC](https://github.com/MG1937/ASC) (`droidasc`, a core dependency) for the DEX side and the regular native backends for every shared object in the package:
@@ -102,7 +134,7 @@ Other disassemblers may be added in the future.
 - `src/raw/<package>/<Class>.java`: one decompiled Java file per class, folders follow Java packages (no clustering, no summaries).
 - `AndroidManifest.xml` + `manifest.json`: decoded and parsed manifest (permissions, components with intent filters and exported state, application attributes, split manifests).
 - `classes.json`, `functions.json`, `function-index.json`, `strings.json`, `imports.json`, `exports.json` (exported components + JNI methods), `reachable.json` (from manifest components), `package-graph.json`, `sections.json`, `triage.json`.
-- `lib/<abi>/*.so`: every native library extracted; `native/<abi>/<lib>/`: a complete nested ToCode export per library (all ABIs), produced on a background thread while the DEX side decompiles. `native-libs.json` records the status of each (each library runs in its own process; one failing or being OOM-killed never fails the APK export, and the native thread waits for `TOCODE_APK_NATIVE_MIN_FREE_MB`, default 1024 MB, of free memory before each library). Pass `--no-native` to skip the native decompilation (libraries are still extracted). `--backend` picks the native backend (`auto`/`ida`/`r2`/`angr`; `binja` is not supported for APKs).
+- `lib/<abi>/*.so`: every native library extracted; `native/<abi>/<lib>/`: a complete nested ToCode export per library (all ABIs), produced on a background thread while the DEX side decompiles. `native-libs.json` records the status of each (each library runs in its own process; one failing or being OOM-killed never fails the APK export, and the native thread waits for `TOCODE_NATIVE_MIN_FREE_MB`, default 1024 MB, of free memory before each library). Pass `--no-native` to skip the native decompilation (libraries are still extracted). `--backend` picks the native backend (`auto`/`ida`/`r2`/`angr`; `binja` is not supported for APKs).
 - `data/apk/**`: every other APK entry verbatim; `data/res/**/*.xml` and `data/resources.json`: decoded binary XML and `resources.arsc`.
 
 `base.apk` automatically merges sibling `split_*.apk` files (config and ABI splits) into the same project; `--no-splits` exports it alone. The default output directory is `<manifest package>_decompiler`.

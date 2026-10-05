@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tocode-cli"
 dynamic = ["version"]
-description = "Export compiled binaries, IDA databases, and Android APKs as source-like projects for reverse engineering agents."
+description = "Export compiled binaries, IDA databases, Android APKs, and .NET assemblies as source-like projects for reverse engineering agents."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "buzzer-re" }]
@@ -19,12 +19,17 @@ keywords = [
   "android",
   "apk",
   "dex",
+  "dotnet",
+  "csharp",
+  "il",
   "agents",
 ]
 dependencies = [
   "droidasc==0.1.1.post1",
   "ida-domain==0.5.0",
   "idapro==0.0.9",
+  "pythonnet==3.0.5 ; python_full_version < '3.11'",
+  "pythonnet==3.2.0 ; python_full_version >= '3.11'",
   "r2pipe==1.9.8",
   "rpyc==6.0.2",
   "tqdm==4.67.3",
@@ -93,6 +98,12 @@ ignore_missing_imports = true
 module = ["droidasc.*", "androguard.*"]
 ignore_missing_imports = true
 
+# The .NET backend imports CLR namespaces through pythonnet at runtime; they
+# have no Python stubs.
+[[tool.mypy.overrides]]
+module = ["clr", "clr_loader.*", "pythonnet.*", "System", "System.*", "dnlib.*", "ICSharpCode.*"]
+ignore_missing_imports = true
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 
@@ -102,3 +113,8 @@ version = { attr = "tocode.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# dnlib and ICSharpCode.Decompiler (MIT) ship inside the package so .NET input
+# needs only a .NET runtime; see src/tocode/backends/dotnet_lib/README.md.
+[tool.setuptools.package-data]
+"tocode.backends" = ["dotnet_lib/*.dll", "dotnet_lib/*.txt", "dotnet_lib/*.md"]
