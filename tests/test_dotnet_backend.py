@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 import struct
@@ -11,7 +10,6 @@ import pytest
 from dotnet_fixtures import managed_pe, native_elf, single_file_bundle, write
 from tocode.backends import dotnet as backend
 from tocode.backends.dotnet import (
-    DOTNET_LIB_DIR,
     discover_dotnet_input,
     il_method_ranges,
     is_dotnet_input,
@@ -449,22 +447,11 @@ def test_find_runtime_requires_net9_or_newer(
     assert backend.find_runtime() is None
 
 
-def test_vendored_libraries_match_the_documented_hashes() -> None:
-    expected = {
-        "dnlib.dll": "566fdab59c91a3c2eab14a22b67f01cb3c0cdb48fa9b9b6677e2b32998636efb",
-        "ICSharpCode.Decompiler.dll": "38e6abf7497845d79d9d01d56351a3203991356de1d3496b8c51142f495e9f9c",
-    }
-    for name, digest in expected.items():
-        path = DOTNET_LIB_DIR / name
-        assert hashlib.sha256(path.read_bytes()).hexdigest() == digest, name
-        assert digest in (DOTNET_LIB_DIR / "README.md").read_text(encoding="utf-8")
-    assert (DOTNET_LIB_DIR / "LICENSE-dnlib.txt").is_file()
-    assert (DOTNET_LIB_DIR / "LICENSE-ICSharpCode.Decompiler.txt").is_file()
-
-
 def _runtime_available() -> bool:
+    from tocode.backends import dotnet_libs
+
     try:
-        return backend.probe_dotnet()[0]
+        return backend.probe_dotnet()[0] and dotnet_libs.is_installed()
     except Exception:  # pragma: no cover
         return False
 

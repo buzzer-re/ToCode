@@ -1,6 +1,7 @@
 """.NET backend: dnlib inventory plus ICSharpCode.Decompiler C#/IL output.
 
-Both libraries ship with ToCode (``dotnet_lib/``) and are loaded in-process
+Neither library ships with ToCode: ``dotnet_libs`` downloads them on first use
+(with consent, hash-pinned) into a per-user folder, and they are loaded in-process
 through pythonnet, so exporting a .NET binary needs a .NET 9+ runtime and no
 other tool. The parent process inventories every assembly with dnlib (types,
 members, P/Invoke, resources, references) and scans IL bytes in pure Python for
@@ -22,6 +23,7 @@ from typing import Any
 import zipfile
 
 from ..errors import ToCodeError
+from . import dotnet_libs
 from .dotnet_pe import (
     PE_MACHINES,
     BundleManifest,
@@ -35,8 +37,6 @@ from .dotnet_pe import (
     scan_il_tokens,
 )
 
-DOTNET_LIB_DIR = Path(__file__).with_name("dotnet_lib")
-DOTNET_LIBRARIES = ("dnlib.dll", "ICSharpCode.Decompiler.dll")
 MIN_RUNTIME_MAJOR = 9
 NUPKG_SUFFIXES = frozenset({".nupkg", ".snupkg"})
 MAX_STRING_XREFS = 64
@@ -505,11 +505,6 @@ def find_runtime() -> tuple[Path, str] | None:
 def probe_dotnet() -> tuple[bool, str]:
     if importlib.util.find_spec("pythonnet") is None:
         return False, "pythonnet is not installed (pip install pythonnet)"
-    missing = [
-        name for name in DOTNET_LIBRARIES if not (DOTNET_LIB_DIR / name).is_file()
-    ]
-    if missing:
-        return False, f"bundled .NET libraries missing: {', '.join(missing)}"
     found = find_runtime()
     if found is None:
         return (
@@ -521,13 +516,14 @@ def probe_dotnet() -> tuple[bool, str]:
 
 
 def load_runtime() -> dict[str, Any]:
-    """Load CoreCLR and the bundled assemblies once per process."""
+    """Load CoreCLR and the downloaded libraries once per process."""
     global _runtime
     if _runtime is not None:
         return _runtime
     ok, reason = probe_dotnet()
     if not ok:
         raise ToCodeError(f".NET input requires the .NET backend: {reason}")
+    library_dir = dotnet_libs.require_installed()
     found = find_runtime()
     assert found is not None
     root, version = found
@@ -544,8 +540,8 @@ def load_runtime() -> dict[str, Any]:
             raise ToCodeError(f"cannot load the .NET runtime: {exc}") from exc
     import clr  # type: ignore[import-not-found]
 
-    for name in DOTNET_LIBRARIES:
-        clr.AddReference(str(DOTNET_LIB_DIR / name))
+    for spec in dotnet_libs.LIBRARIES:
+        clr.AddReference(str(library_dir / spec.file_name))
     import System  # type: ignore[import-not-found]
 
     actual = str(System.Environment.Version)

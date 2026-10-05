@@ -77,12 +77,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-native",
         action="store_true",
-        help="APK input: only export the DEX/Android side; native .so libraries are extracted but not decompiled.",
+        help="APK and .NET input: only export the DEX/managed side; native libraries are extracted and listed but not decompiled.",
     )
     parser.add_argument(
         "--as-native",
         action="store_true",
         help=".NET input: skip the .NET backend and export the file with the native backend (IDA/r2/angr) like any PE/ELF.",
+    )
+    parser.add_argument(
+        "--setup-dotnet",
+        action="store_true",
+        help="Download and verify the .NET decompiler libraries (dnlib, ICSharpCode.Decompiler) from nuget.org without prompting, or re-verify an existing install, then exit. .NET exports otherwise ask once on first use.",
     )
     parser.add_argument(
         "--include-framework",
@@ -184,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     progress = Progress(enabled=not args.quiet)
+    if args.setup_dotnet:
+        return _setup_dotnet()
 
     binja_only = args.list_binja or args.all_views or args.binja_view is not None
     if args.backend != "binja" and binja_only:
@@ -304,8 +311,30 @@ def _native_options(args: argparse.Namespace) -> NativeOptions:
     )
 
 
+def _setup_dotnet() -> int:
+    from .backends import dotnet_libs
+
+    try:
+        dotnet_libs.setup(log=lambda message: print(message, file=sys.stderr))
+    except ToCodeError as exc:
+        print(f"tocode: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _run_dotnet(binary: Path, *, args: argparse.Namespace, progress: Progress) -> int:
+    from .backends import dotnet_libs
     from .dotnet import DotnetExportOptions, export_dotnet
+
+    try:
+        dotnet_libs.ensure_libraries(
+            interactive=sys.stdin.isatty() and sys.stderr.isatty(),
+            ask=_ask_on_stderr,
+            log=progress.log,
+        )
+    except ToCodeError as exc:
+        print(f"tocode: {exc}", file=sys.stderr)
+        return 1
 
     options = DotnetExportOptions(
         out_dir=args.out_dir,
@@ -337,6 +366,14 @@ def _run_dotnet(binary: Path, *, args: argparse.Namespace, progress: Progress) -
             print(f"native: {line}", file=sys.stderr)
         print(f"Exported in {_format_duration(time.monotonic() - started)}")
     return 0
+
+
+def _ask_on_stderr(prompt: str) -> str:
+    print(prompt, end="", file=sys.stderr, flush=True)
+    line = sys.stdin.readline()
+    if not line:  # end of input is a "no", never an implicit yes
+        raise EOFError
+    return line
 
 
 def _format_duration(seconds: float) -> str:

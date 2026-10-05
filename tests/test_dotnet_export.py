@@ -693,9 +693,10 @@ def test_interesting_strings_rank_secrets_first() -> None:
 
 
 def _real_runtime() -> bool:
+    from tocode.backends import dotnet_libs
     from tocode.backends.dotnet import probe_dotnet
 
-    return probe_dotnet()[0]
+    return probe_dotnet()[0] and dotnet_libs.is_installed()
 
 
 @pytest.mark.skipif(

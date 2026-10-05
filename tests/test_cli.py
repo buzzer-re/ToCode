@@ -149,6 +149,9 @@ def test_main_routes_dotnet_input_to_dotnet_export(tmp_path, monkeypatch) -> Non
         )
 
     monkeypatch.setattr(dotnet, "export_dotnet", fake_export)
+    from tocode.backends import dotnet_libs
+
+    monkeypatch.setattr(dotnet_libs, "ensure_libraries", lambda **_kwargs: tmp_path)
 
     assert (
         cli.main(["--include-framework", "--no-native", "-j", "2", "-q", str(binary)])
@@ -191,3 +194,35 @@ def test_main_rejects_binja_backend_for_dotnet_input(tmp_path) -> None:
         main(["--backend", "binja", str(binary)])
 
     assert info.value.code == 2
+
+
+def test_parser_has_setup_dotnet_flag() -> None:
+    assert build_parser().parse_args(["--setup-dotnet"]).setup_dotnet is True
+    assert build_parser().parse_args(["app.dll"]).setup_dotnet is False
+
+
+def test_main_setup_dotnet_runs_without_an_input(monkeypatch) -> None:
+    from tocode import cli
+    from tocode.backends import dotnet_libs
+
+    calls = []
+    monkeypatch.setattr(dotnet_libs, "setup", lambda **kwargs: calls.append(kwargs))
+
+    assert cli.main(["--setup-dotnet"]) == 0
+    assert len(calls) == 1
+
+
+def test_main_dotnet_input_without_libraries_explains_setup(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from dotnet_fixtures import managed_pe
+
+    from tocode import cli
+
+    monkeypatch.setenv("TOCODE_DOTNET_LIB_DIR", str(tmp_path / "libs"))
+    binary = tmp_path / "App.dll"
+    binary.write_bytes(managed_pe())
+
+    # pytest's stdin is not a terminal, so this must fail fast, not prompt.
+    assert cli.main(["-q", str(binary)]) == 1
+    assert "tocode --setup-dotnet" in capsys.readouterr().err

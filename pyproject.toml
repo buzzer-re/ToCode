@@ -113,8 +113,3 @@ version = { attr = "tocode.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-# dnlib and ICSharpCode.Decompiler (MIT) ship inside the package so .NET input
-# needs only a .NET runtime; see src/tocode/backends/dotnet_lib/README.md.
-[tool.setuptools.package-data]
-"tocode.backends" = ["dotnet_lib/*.dll", "dotnet_lib/*.txt", "dotnet_lib/*.md"]
