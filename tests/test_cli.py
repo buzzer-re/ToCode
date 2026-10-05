@@ -113,3 +113,81 @@ def test_package_installs_a_tocode_console_script() -> None:
     }
 
     assert scripts == {"tocode": "tocode.cli:main"}
+
+
+def test_parser_has_dotnet_flags() -> None:
+    args = build_parser().parse_args(["--as-native", "--include-framework", "app.dll"])
+
+    assert args.as_native is True and args.include_framework is True
+    assert build_parser().parse_args(["app.dll"]).as_native is False
+
+
+def test_main_routes_dotnet_input_to_dotnet_export(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from dotnet_fixtures import managed_pe
+
+    from tocode import cli, dotnet
+
+    binary = tmp_path / "App.dll"
+    binary.write_bytes(managed_pe())
+    seen = {}
+
+    def fake_export(path, *, options, progress):
+        seen["path"] = path
+        seen["options"] = options
+        return SimpleNamespace(
+            root_dir=tmp_path / "out",
+            kind="assembly",
+            assemblies=["App"],
+            type_count=1,
+            method_count=1,
+            failed_types=[],
+            native_total=0,
+            native_done=0,
+            native_errors=[],
+        )
+
+    monkeypatch.setattr(dotnet, "export_dotnet", fake_export)
+
+    assert (
+        cli.main(["--include-framework", "--no-native", "-j", "2", "-q", str(binary)])
+        == 0
+    )
+    assert seen["path"] == binary.resolve()
+    assert seen["options"].include_framework is True
+    assert seen["options"].native is False
+    assert seen["options"].jobs == 2
+
+
+def test_main_as_native_skips_the_dotnet_backend(tmp_path, monkeypatch) -> None:
+    from dotnet_fixtures import managed_pe
+
+    from tocode import cli
+
+    binary = tmp_path / "App.dll"
+    binary.write_bytes(managed_pe())
+    called = {}
+
+    def fake_run_one(path, *, args, progress, out_dir):
+        called["path"] = path
+        raise cli.ToCodeError("stop here")
+
+    monkeypatch.setattr(cli, "_run_one", fake_run_one)
+
+    assert cli.main(["--as-native", "-q", str(binary)]) == 1
+    assert called["path"] == binary.resolve()
+
+
+def test_main_rejects_binja_backend_for_dotnet_input(tmp_path) -> None:
+    from dotnet_fixtures import managed_pe
+
+    from tocode.cli import main
+
+    binary = tmp_path / "App.dll"
+    binary.write_bytes(managed_pe())
+
+    with pytest.raises(SystemExit) as info:
+        main(["--backend", "binja", str(binary)])
+
+    assert info.value.code == 2

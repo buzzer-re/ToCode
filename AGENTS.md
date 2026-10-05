@@ -1,6 +1,6 @@
 # AGENTS
 
-This repository contains ToCode, a Python-only binary exporter. ToCode takes one binary, IDA database, or Android APK path and writes one source-like project directory for reverse-engineering agents.
+This repository contains ToCode, a Python-only binary exporter. ToCode takes one binary, IDA database, Android APK, or .NET assembly/bundle/package path and writes one source-like project directory for reverse-engineering agents.
 
 ## Scope
 
@@ -16,6 +16,8 @@ This repository contains ToCode, a Python-only binary exporter. ToCode takes one
 - `src/tocode/__init__.py`: package version and `export_from_binaryview()`, the in-UI Binary Ninja library entry.
 - `src/tocode/analysis.py`: backend-neutral binary inventory and call graph normalization.
 - `src/tocode/backends/`: IDA Domain, radare2, angr, and Binary Ninja (`binja.py`) session adapters, plus the ASC/droidasc APK backend (`asc.py`: APK set discovery, DEX inventory, worker-side class decompilation).
+- `src/tocode/backends/dotnet.py` / `dotnet_pe.py`: .NET backend (input discovery for assemblies, apphosts, single-file bundles and NuGet packages; dnlib inventory; pure-Python PE/CLR/bundle parsing and IL token scan; worker-side C#/IL decompilation). `backends/dotnet_lib/` holds the bundled dnlib and ICSharpCode.Decompiler DLLs (MIT) with their provenance.
+- `src/tocode/dotnet.py`: .NET export pipeline; `dotnet_metadata.py`: .NET JSON documents and the generated `AGENTS.md`.
 - `src/tocode/apk.py`: APK export pipeline (extraction, decompile pool, resource decoding, metadata); `apk_metadata.py`: manifest parsing and Android JSON documents; `apk_native.py`: extraction and background native export of every `.so`.
 - `src/tocode/exporter.py`: project writer, function rendering, worker-session rendering, generated export `AGENTS.md`.
 - `src/tocode/metadata.py`: JSON metadata and triage documents.
@@ -71,6 +73,17 @@ APK input (`.apk`, `.apks`, `.xapk`) uses the ASC backend and writes instead:
 
 `base.apk` merges sibling `split_*.apk` files unless `--no-splits`; bundles are unpacked and merged. `--backend` selects the native backend for the `.so` exports (`binja` is rejected).
 
+.NET input (a managed PE, an apphost launcher with its `.dll`, a single-file bundle, or a `.nupkg`; detected by content, `--as-native` opts out) uses the .NET backend and writes instead:
+
+- `src/raw/<Assembly>/<Namespace>/**/<Type>.cs` and `<Type>.il` (C# and IL with raw bytecode per top-level type; nested types inside), `src/raw/<Assembly>/Properties/AssemblyInfo.cs` and `Manifest.il`, `src/raw/<Assembly>/<Assembly>.csproj`
+- `assemblies.json`, `types.json`, `namespace-graph.json`, `resources.json`, `container.json`, `native-libs.json`
+- `functions.json`, `function-index.json` (`c` = C#, `asm` = IL), `strings.json`, `imports.json`, `exports.json`, `sections.json`, `reachable.json`, `triage.json`, `project.json`, `export-manifest.json`
+- `data/resources/<Assembly>/*` (embedded resources, `.resources` decoded to JSON), `data/assemblies/*` and `data/<bundle|nupkg>/*` (extracted container entries)
+- `lib/<arch>/*` and `native/<arch>/<lib>/` for mixed-mode code, bundled native libraries, and P/Invoke targets next to the input (unless `--no-native`)
+- `tocode.log`, generated `AGENTS.md` and `CLAUDE.md`
+
+Framework/runtime assemblies and native runtime libraries inside bundles and packages are inventoried but only decompiled with `--include-framework`.
+
 ## Development
 
 - Prefer `uv` for local commands.
@@ -87,7 +100,8 @@ APK input (`.apk`, `.apks`, `.xapk`) uses the ASC backend and writes instead:
 - radare2/r2pipe is a fallback backend.
 - angr is the optional pure-Python fallback backend (`[angr]` extra).
 - ASC (`droidasc`, PyPI) is the APK/DEX backend and a core runtime dependency. It pulls androguard. `backends/asc.py` is the only module that imports it; it pre-imports the modules ASC would otherwise stub in `sys.modules` and silences androguard's loguru logging. Class decompilation is not thread-safe, so it runs in spawned worker processes (recycled in rounds; do not use `max_tasks_per_child`, it deadlocks spawn pools on some CPython builds). The big per-method/per-class/per-string JSON documents are streamed row by row (`apk_metadata.write_json_rows`), never built as one object.
-- APK native libraries are exported by `apk_native.py` on a background thread, each `export_binary` in its own spawned process so a backend OOM-kill or crash only fails that library (`native-libs.json` status). The thread waits for `TOCODE_APK_NATIVE_MIN_FREE_MB` (default 1024) of free memory before starting each library so it does not starve the DEX pool. `TOCODE_WORKER_TMP_DIR` also places the unpacked `.apks` bundle.
+- APK native libraries are exported by `apk_native.py` on a background thread, each `export_binary` in its own spawned process so a backend OOM-kill or crash only fails that library (`native-libs.json` status). The thread waits for `TOCODE_NATIVE_MIN_FREE_MB` (default 1024) of free memory before starting each library so it does not starve the DEX pool. `TOCODE_WORKER_TMP_DIR` also places the unpacked `.apks` bundle.
+- The .NET backend needs `pythonnet` (core dependency, pinned per Python version) and a .NET 9+ runtime on the host. dnlib 4.5.0 and ICSharpCode.Decompiler 11.1 are vendored under `src/tocode/backends/dotnet_lib/` (package data; hashes in its README and checked by `tests/test_dotnet_backend.py`); ICSharpCode.Decompiler 11 needs System.Reflection.Metadata 9, hence .NET 9+. Decompilation runs in spawned worker processes (recycled per round; a batch that crashes or hangs a worker is retried type by type so only the culprit fails). Tests must not require .NET: use `tests/dotnet_fixtures.py` (synthetic PE/bundles) and fake sessions; runtime-backed tests skip without it.
 - Binary Ninja is an opt-in backend (`--backend binja`, never auto-selected). The
   `binaryninja` module is supplied by the Binary Ninja install (in-UI) or the
   remote VM, so it is not a pip dependency. `rpyc`, the client used for the
