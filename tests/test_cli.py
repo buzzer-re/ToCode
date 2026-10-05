@@ -95,3 +95,134 @@ def test_main_routes_apk_input_to_apk_export(tmp_path, monkeypatch) -> None:
     assert seen["options"].jobs == 3
     assert seen["options"].native_options.backend == "r2"
     assert seen["options"].native_options.jobs == 3
+
+
+def test_package_installs_a_tocode_console_script() -> None:
+    """The PyPI distribution is `tocode-cli`, but the command stays `tocode`."""
+    import importlib.metadata as metadata
+
+    try:
+        distribution = metadata.distribution("tocode-cli")
+    except metadata.PackageNotFoundError:  # pragma: no cover - not installed
+        pytest.skip("tocode-cli is not installed in this environment")
+
+    scripts = {
+        entry.name: entry.value
+        for entry in distribution.entry_points
+        if entry.group == "console_scripts"
+    }
+
+    assert scripts == {"tocode": "tocode.cli:main"}
+
+
+def test_parser_has_dotnet_flags() -> None:
+    args = build_parser().parse_args(["--as-native", "--include-framework", "app.dll"])
+
+    assert args.as_native is True and args.include_framework is True
+    assert build_parser().parse_args(["app.dll"]).as_native is False
+
+
+def test_main_routes_dotnet_input_to_dotnet_export(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from dotnet_fixtures import managed_pe
+
+    from tocode import cli, dotnet
+
+    binary = tmp_path / "App.dll"
+    binary.write_bytes(managed_pe())
+    seen = {}
+
+    def fake_export(path, *, options, progress):
+        seen["path"] = path
+        seen["options"] = options
+        return SimpleNamespace(
+            root_dir=tmp_path / "out",
+            kind="assembly",
+            assemblies=["App"],
+            type_count=1,
+            method_count=1,
+            failed_types=[],
+            native_total=0,
+            native_done=0,
+            native_errors=[],
+        )
+
+    monkeypatch.setattr(dotnet, "export_dotnet", fake_export)
+    from tocode.backends import dotnet_libs
+
+    monkeypatch.setattr(dotnet_libs, "ensure_libraries", lambda **_kwargs: tmp_path)
+
+    assert (
+        cli.main(["--include-framework", "--no-native", "-j", "2", "-q", str(binary)])
+        == 0
+    )
+    assert seen["path"] == binary.resolve()
+    assert seen["options"].include_framework is True
+    assert seen["options"].native is False
+    assert seen["options"].jobs == 2
+
+
+def test_main_as_native_skips_the_dotnet_backend(tmp_path, monkeypatch) -> None:
+    from dotnet_fixtures import managed_pe
+
+    from tocode import cli
+
+    binary = tmp_path / "App.dll"
+    binary.write_bytes(managed_pe())
+    called = {}
+
+    def fake_run_one(path, *, args, progress, out_dir):
+        called["path"] = path
+        raise cli.ToCodeError("stop here")
+
+    monkeypatch.setattr(cli, "_run_one", fake_run_one)
+
+    assert cli.main(["--as-native", "-q", str(binary)]) == 1
+    assert called["path"] == binary.resolve()
+
+
+def test_main_rejects_binja_backend_for_dotnet_input(tmp_path) -> None:
+    from dotnet_fixtures import managed_pe
+
+    from tocode.cli import main
+
+    binary = tmp_path / "App.dll"
+    binary.write_bytes(managed_pe())
+
+    with pytest.raises(SystemExit) as info:
+        main(["--backend", "binja", str(binary)])
+
+    assert info.value.code == 2
+
+
+def test_parser_has_setup_dotnet_flag() -> None:
+    assert build_parser().parse_args(["--setup-dotnet"]).setup_dotnet is True
+    assert build_parser().parse_args(["app.dll"]).setup_dotnet is False
+
+
+def test_main_setup_dotnet_runs_without_an_input(monkeypatch) -> None:
+    from tocode import cli
+    from tocode.backends import dotnet_libs
+
+    calls = []
+    monkeypatch.setattr(dotnet_libs, "setup", lambda **kwargs: calls.append(kwargs))
+
+    assert cli.main(["--setup-dotnet"]) == 0
+    assert len(calls) == 1
+
+
+def test_main_dotnet_input_without_libraries_explains_setup(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from dotnet_fixtures import managed_pe
+
+    from tocode import cli
+
+    monkeypatch.setenv("TOCODE_DOTNET_LIB_DIR", str(tmp_path / "libs"))
+    binary = tmp_path / "App.dll"
+    binary.write_bytes(managed_pe())
+
+    # pytest's stdin is not a terminal, so this must fail fast, not prompt.
+    assert cli.main(["-q", str(binary)]) == 1
+    assert "tocode --setup-dotnet" in capsys.readouterr().err

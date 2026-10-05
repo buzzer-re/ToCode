@@ -10,6 +10,7 @@ from .analysis import create_analyzer
 from .apk import ApkExportOptions, export_apk
 from .apk_native import NativeOptions
 from .backends.asc import is_apk_input
+from .backends.dotnet import is_dotnet_input
 from .errors import ToCodeError
 from .exporter import export_binary
 from .naming import default_output_name
@@ -76,7 +77,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-native",
         action="store_true",
-        help="APK input: only export the DEX/Android side; native .so libraries are extracted but not decompiled.",
+        help="APK and .NET input: only export the DEX/managed side; native libraries are extracted and listed but not decompiled.",
+    )
+    parser.add_argument(
+        "--as-native",
+        action="store_true",
+        help=".NET input: skip the .NET backend and export the file with the native backend (IDA/r2/angr) like any PE/ELF.",
+    )
+    parser.add_argument(
+        "--setup-dotnet",
+        action="store_true",
+        help="Download and verify the .NET decompiler libraries (dnlib, ICSharpCode.Decompiler) from nuget.org without prompting, or re-verify an existing install, then exit. .NET exports otherwise ask once on first use.",
+    )
+    parser.add_argument(
+        "--include-framework",
+        action="store_true",
+        help=".NET input: also decompile .NET framework/runtime assemblies and native runtime libraries found in bundles and packages.",
     )
     parser.add_argument(
         "--no-splits",
@@ -173,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     progress = Progress(enabled=not args.quiet)
+    if args.setup_dotnet:
+        return _setup_dotnet()
 
     binja_only = args.list_binja or args.all_views or args.binja_view is not None
     if args.backend != "binja" and binja_only:
@@ -187,6 +205,16 @@ def main(argv: list[str] | None = None) -> int:
                 "--backend binja is not supported for APK input; native libraries "
                 "use ida, r2, or angr"
             )
+        if (
+            args.binary is not None
+            and not args.as_native
+            and args.binary.is_file()
+            and is_dotnet_input(args.binary)
+        ):
+            parser.error(
+                "--backend binja is not supported for .NET input; native code "
+                "uses ida, r2, or angr (or pass --as-native)"
+            )
         return _run_binja(args, progress, parser, argv)
 
     if args.binary is None:
@@ -199,6 +227,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     if is_apk_input(binary):
         return _run_apk(binary, args=args, progress=progress, parser=parser)
+    if not args.as_native and binary.is_file() and is_dotnet_input(binary):
+        return _run_dotnet(binary, args=args, progress=progress)
     log_root = (
         args.out_dir
         if args.out_dir is not None
@@ -242,16 +272,7 @@ def _run_apk(
         jobs=args.jobs,
         native=not args.no_native,
         splits=not args.no_splits,
-        native_options=NativeOptions(
-            backend=args.backend,
-            analysis_command=args.analysis,
-            idadir=args.idadir,
-            ida_domain_path=args.ida_domain_path,
-            purge_cache=args.purge_cache,
-            jobs=args.jobs,
-            tree=args.tree,
-            entropy=args.entropy,
-        ),
+        native_options=_native_options(args),
     )
     started = time.monotonic()
     try:
@@ -275,6 +296,84 @@ def _run_apk(
             print(f"native: {line}", file=sys.stderr)
         print(f"Exported in {_format_duration(time.monotonic() - started)}")
     return 0
+
+
+def _native_options(args: argparse.Namespace) -> NativeOptions:
+    return NativeOptions(
+        backend=args.backend,
+        analysis_command=args.analysis,
+        idadir=args.idadir,
+        ida_domain_path=args.ida_domain_path,
+        purge_cache=args.purge_cache,
+        jobs=args.jobs,
+        tree=args.tree,
+        entropy=args.entropy,
+    )
+
+
+def _setup_dotnet() -> int:
+    from .backends import dotnet_libs
+
+    try:
+        dotnet_libs.setup(log=lambda message: print(message, file=sys.stderr))
+    except ToCodeError as exc:
+        print(f"tocode: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_dotnet(binary: Path, *, args: argparse.Namespace, progress: Progress) -> int:
+    from .backends import dotnet_libs
+    from .dotnet import DotnetExportOptions, export_dotnet
+
+    try:
+        dotnet_libs.ensure_libraries(
+            interactive=sys.stdin.isatty() and sys.stderr.isatty(),
+            ask=_ask_on_stderr,
+            log=progress.log,
+        )
+    except ToCodeError as exc:
+        print(f"tocode: {exc}", file=sys.stderr)
+        return 1
+
+    options = DotnetExportOptions(
+        out_dir=args.out_dir,
+        jobs=args.jobs,
+        native=not args.no_native,
+        include_framework=args.include_framework,
+        native_options=_native_options(args),
+    )
+    started = time.monotonic()
+    try:
+        summary = export_dotnet(binary, options=options, progress=progress)
+    except KeyboardInterrupt:
+        progress.log("tocode: interrupted")
+        print("tocode: interrupted", file=sys.stderr)
+        return 130
+    except ToCodeError as exc:
+        progress.log(f"tocode: {exc}")
+        print(f"tocode: {exc}", file=sys.stderr)
+        return 1
+    if not args.quiet:
+        print(f"Project: {summary.root_dir}")
+        print(
+            f"Summary: kind={summary.kind} assemblies={len(summary.assemblies)} "
+            f"types={summary.type_count} methods={summary.method_count} "
+            f"failures={len(summary.failed_types)} "
+            f"natives={summary.native_done}/{summary.native_total}"
+        )
+        for line in summary.native_errors:
+            print(f"native: {line}", file=sys.stderr)
+        print(f"Exported in {_format_duration(time.monotonic() - started)}")
+    return 0
+
+
+def _ask_on_stderr(prompt: str) -> str:
+    print(prompt, end="", file=sys.stderr, flush=True)
+    line = sys.stdin.readline()
+    if not line:  # end of input is a "no", never an implicit yes
+        raise EOFError
+    return line
 
 
 def _format_duration(seconds: float) -> str:

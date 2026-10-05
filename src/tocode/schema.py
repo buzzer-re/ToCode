@@ -279,3 +279,18 @@ class ApkExportSummary:
     native_errors: list[str] = field(default_factory=list)
     manifest_path: Path | None = None
     seconds: float = 0.0
+
+
+@dataclass(slots=True)
+class DotnetExportSummary:
+    root_dir: Path
+    kind: str
+    assemblies: list[str]
+    type_count: int
+    method_count: int
+    source_files: list[Path]
+    failed_types: list[tuple[str, str]]
+    native_total: int
+    native_done: int
+    native_errors: list[str] = field(default_factory=list)
+    seconds: float = 0.0

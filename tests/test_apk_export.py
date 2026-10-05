@@ -987,3 +987,31 @@ def test_export_apk_tags_native_libs_with_the_package(
     )
 
     assert seen == ["com.example.app"] * 3
+
+
+def test_native_runner_heartbeat_reports_memory_wait(tmp_path: Path) -> None:
+    lib = NativeLib(
+        "arm64",
+        "libfoo.so",
+        "lib/arm64/libfoo.so",
+        "base.apk",
+        1,
+        "h",
+        tmp_path / "a.so",
+    )
+    runner = NativeRunner(
+        libs=[lib],
+        root=tmp_path,
+        progress=Progress(enabled=False),
+        exporter=_fake_native_exporter(),
+        min_free_mb=2048,
+    )
+    runner.waiting = (lib, 900)
+
+    status = runner.describe_current()
+
+    assert status is not None
+    assert (
+        "waiting for memory before libfoo.so (arm64): 900 MB free, need 2048 MB"
+        in status
+    )
