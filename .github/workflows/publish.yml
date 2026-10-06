@@ -1,0 +1,67 @@
+name: Publish to PyPI
+
+# Runs when a version tag is pushed, e.g. `git tag v0.2.1 && git push origin v0.2.1`.
+# The tag must match __version__ in src/tocode/__init__.py.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and build
+    runs-on: ubuntu-24.04
+    steps:
+      # actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Install uv
+        # astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+
+      - name: Check the tag matches the package version
+        run: |
+          version="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/tocode/__init__.py)"
+          if [[ "${GITHUB_REF_NAME}" != "v${version}" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match __version__ ${version} (expected tag v${version})"
+            exit 1
+          fi
+          echo "Publishing tocode-cli ${version}"
+
+      - name: Run tests
+        run: uv run --locked --extra dev pytest -q
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Check the distributions
+        run: uvx twine==6.2.0 check --strict dist/*
+
+      # actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/tocode-cli/
+    permissions:
+      id-token: write  # PyPI trusted publishing (no API token stored)
+    steps:
+      # actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: dist
+          path: dist/
+
+      # pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
