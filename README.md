@@ -246,4 +246,4 @@ export_from_binaryview(bv, "out/")
 
 ## Development
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for setup, tests, the local quality gate, and release steps.
+See [DEVELOPMENT.md](https://github.com/buzzer-re/ToCode/blob/main/DEVELOPMENT.md) for setup, tests, the local quality gate, and release steps.
