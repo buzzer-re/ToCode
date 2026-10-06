@@ -1,6 +1,6 @@
 # ToCode
 
-ToCode exports a binary, IDA database, Android APK, or .NET assembly into a source-like project tree: raw recovered C (Java for APKs, C# and IL for .NET), matching assembly, function summaries, section data, optional IDA database, and metadata that coding agents can read directly.
+ToCode exports a binary, IDA database, Android APK, .NET assembly, or a whole application folder into a source-like project tree: raw recovered C (Java for APKs, C# and IL for .NET), matching assembly, function summaries, section data, optional IDA database, and metadata that coding agents can read directly.
 
 ## Why
 
@@ -141,6 +141,33 @@ tocode base.apk                     # DEX + all splits + native libs (IDA/r2/ang
 tocode app.apks --no-native -j 4    # bundle, DEX/Android side only
 ```
 
+
+### Folders
+
+Point `tocode` at a directory (a game folder, a Linux app, a macOS `.app` bundle, a .NET publish folder) and it exports every binary in it, then links them together.
+
+The links come from the binaries themselves: import and load tables, resolved with each platform's loader rules (`@rpath`/`@loader_path` on macOS, `RPATH`/`RUNPATH` and symbol versions on Linux, the application directory and forwarders on Windows, AssemblyRef/MemberRef signatures and P/Invoke for .NET). ToCode never matches by name similarity. When the executable calls `foo` from `libfoo.so`, the link tells you which file defines it and the file and line range of that function in the library's export.
+
+```text
+Game_decompiled/
+  AGENTS.md, CLAUDE.md, project.json, export-manifest.json, tocode.log
+  inventory.json          # every file: kind, arch, hash, export status
+  dependency-graph.json   # which file loads which, and the loader rule used
+  mappings.json           # every import -> defining file, function, line range; its call sites
+  bin/game/               # one regular export per binary, mirroring the folder
+  lib/libengine.so/
+```
+
+Inside each export, `imports.json` and `functions.json` carry the same links, and calls into other files get a trailing comment in the decompiled source: `/* tocode-link: foo -> lib/libfoo.so/src/raw/app/x.c:23-45 */`. The comments never add lines, so all line numbers stay valid.
+
+Binaries are exported one at a time, executables first and then the libraries they load. Each runs in its own process, so a crash or out-of-memory kill only fails that file. Re-running the same command skips finished binaries and resumes the rest. Bundled runtimes (VC++/MinGW/libstdc++ copies, the .NET framework) are linked but only decompiled with `--include-framework`. Universal Mach-O files use the main executable's architecture (`--arch` to override).
+
+```bash
+tocode --plan Game/                          # list binaries, export order, and links; decompile nothing
+tocode Game/ --only 'bin/*' --only '**/libengine.so'   # export a subset; the rest stays linked
+tocode Game/ --exclude '*.dll'               # skip matches
+tocode Game/ --links-only                    # recompute links over existing exports
+```
 
 ### Using
 

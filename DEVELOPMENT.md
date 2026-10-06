@@ -74,7 +74,28 @@ uv run tocode /bin/true -o /tmp/tocode-check --backend auto -j 2
 
 Confirm the tree matches the export contract in `AGENTS.md`, `tocode.log` has
 no tracebacks, and `export-manifest.json` reports no unexpected failures. Never
-commit export directories (`*_decompiler/` and similar).
+commit export directories (`*_decompiler/`, `*_decompiled/`, and similar).
+
+For folder mode, build a small folder whose links you know and check that
+every expected link lands on the right file and line range:
+
+- Linux: an executable with `-Wl,-rpath,'$ORIGIN/../lib'`, a library with a
+  version script and `RUNPATH $ORIGIN`, and one library only reachable by
+  SONAME.
+- Windows (`apt install gcc-mingw-w64`): an `.exe` and DLLs with a `.def`
+  forwarder, a `NONAME` ordinal export, a delay import (`dlltool -y`), and a
+  32-bit binary next to 64-bit DLLs.
+- .NET: `dotnet publish` of a console app referencing a class library with
+  overloads and a `[DllImport]` into a gcc-built `.so`.
+
+```bash
+uv run tocode --plan path/to/folder          # facts only, no decompilation
+uv run tocode path/to/folder -j 2
+uv run tocode path/to/folder --links-only    # must leave files unchanged when run twice
+```
+
+`tests/link_fixtures.py` builds the same shapes synthetically for the unit
+tests.
 
 ## Dependencies
 

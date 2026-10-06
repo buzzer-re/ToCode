@@ -19,6 +19,8 @@ This repository contains ToCode, a Python-only binary exporter. ToCode takes one
 - `src/tocode/backends/dotnet.py` / `dotnet_pe.py`: .NET backend (input discovery for assemblies, apphosts, single-file bundles and NuGet packages; dnlib inventory; pure-Python PE/CLR/bundle parsing and IL token scan; worker-side C#/IL decompilation). `backends/dotnet_libs.py` downloads dnlib and ICSharpCode.Decompiler on demand (ask once, hash-pinned) into a per-user folder.
 - `src/tocode/dotnet.py`: .NET export pipeline; `dotnet_metadata.py`: .NET JSON documents and the generated `AGENTS.md`.
 - `src/tocode/apk.py`: APK export pipeline (extraction, decompile pool, resource decoding, metadata); `apk_metadata.py`: manifest parsing and Android JSON documents; `apk_native.py`: extraction and background native export of every `.so`.
+- `src/tocode/links/`: pure-Python link facts for folder exports (no backend involved): `sniff.py` file kinds; `binfmt_elf.py`, `binfmt_pe.py`, `binfmt_macho.py` (thin/fat, chained fixups, bind opcodes, export trie), `binfmt_dotnet.py` (dnlib-free metadata tables, signatures, P/Invoke); `inventory.py` folder scan; `resolve.py` loader rules per platform; `bind.py` symbol binding; `names.py` backend-name matching keys.
+- `src/tocode/folder.py`: folder export orchestration (plan, job keys and resume state in `.tocode-folder/`, one isolated process per binary via `NativeRunner`, the two-bar progress display); `folder_links.py`: joins link facts to the exports (`mappings.json`, per-file enrichment); `folder_annotate.py`: line-stable `tocode-link:` source comments; `folder_docs.py`: master `AGENTS.md`/JSON.
 - `src/tocode/exporter.py`: project writer, function rendering, worker-session rendering, generated export `AGENTS.md`.
 - `src/tocode/metadata.py`: JSON metadata and triage documents.
 - `src/tocode/cluster.py`: call-graph clustering.
@@ -91,7 +93,10 @@ Framework/runtime assemblies and native runtime libraries inside bundles and pac
 - Keep generated text, environment variables, and user-visible strings branded as ToCode.
 - Keep status output concise but informative. Progress bars are handled by `tqdm` through `Progress.bar(...)`.
 - Use `apply_patch` for manual edits.
-- Do not commit generated export directories such as `here/`, `ls/`, or `*_decompiler/`.
+- Do not commit generated export directories such as `here/`, `ls/`, `*_decompiler/`, or `*_decompiled/`.
+- Folder links must come only from import/load tables and loader rules; never add name-similarity or string-based (`dlopen`/`LoadLibrary`) links. `links/names.py` keys only locate a backend's function for a symbol the tables already bound.
+- Source annotations must never add or remove lines (`folder_annotate` asserts it); line ranges in the JSON depend on it.
+- Folder runs print one overall bar and one current-binary bar; nested export logs go to `tocode.log` only. Keep per-file terminal output to failures.
 
 ## Dependencies
 

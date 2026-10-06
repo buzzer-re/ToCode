@@ -105,6 +105,7 @@ class NativeOptions:
     jobs: int | None = None
     tree: bool = False
     entropy: bool = False
+    restart: bool = False
 
 
 def _rel(path: Path | None, root: Path) -> str | None:
@@ -195,6 +196,7 @@ def run_native_export(
             jobs=options.jobs,
             tree=options.tree,
             entropy=options.entropy,
+            restart=options.restart,
             origin=describe_origin(lib),
         )
         return (
@@ -220,6 +222,7 @@ def _native_export_child(
             os.setsid()
         except OSError:  # pragma: no cover - already a session leader
             pass
+    watch_parent()
     progress = Progress(enabled=False)
     progress.set_log_path(log_path)
     _redirect_output(log_path)
@@ -231,6 +234,33 @@ def _native_export_child(
         result_queue.put(("error", f"{type(exc).__name__}: {exc}"))
     else:
         result_queue.put(("ok", result))
+
+
+PARENT_POLL_SECONDS = 1.0
+
+
+def watch_parent(poll_seconds: float = PARENT_POLL_SECONDS) -> None:
+    """Kill this process group when the parent ToCode process goes away.
+
+    An isolated export leads its own process group (so Ctrl-C can kill it with
+    its decompiler workers), which also means it outlives a parent killed from
+    outside (``kill``, a closed terminal, the OOM killer) and keeps holding
+    gigabytes. Polling the parent pid works on every POSIX system.
+    """
+    if not hasattr(os, "getppid") or not hasattr(os, "killpg"):
+        return
+    parent = os.getppid()
+
+    def run() -> None:
+        while True:
+            time.sleep(poll_seconds)
+            if os.getppid() != parent:
+                try:
+                    os.killpg(os.getpgrp(), signal.SIGKILL)
+                except OSError:  # pragma: no cover - not a group leader
+                    os._exit(1)
+
+    threading.Thread(target=run, name="tocode-parent-watch", daemon=True).start()
 
 
 _active_children: set[int] = set()
@@ -363,11 +393,15 @@ class NestedLogTail:
         progress: Progress,
         *,
         poll_seconds: float = NATIVE_LOG_TAIL_SECONDS,
+        echo: bool = True,
     ) -> None:
         self.log_path = log_path
         self.lib = lib
         self.progress = progress
         self.poll_seconds = poll_seconds
+        # False: lines go to the main log file only and no bar is drawn; the
+        # caller renders progress from ``rendered``/``total``/``last_line``.
+        self.echo = echo
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._offset = 0
@@ -426,8 +460,12 @@ class NestedLogTail:
         total = _RENDER_TOTAL_RX.search(line)
         if total is not None:
             self.total = int(total.group(1))
-            self._open_bar()
-        self.progress.log(f"native[{self.lib.name}]: {line}")
+            if self.echo:
+                self._open_bar()
+        if self.echo:
+            self.progress.log(f"native[{self.lib.name}]: {line}")
+        else:
+            self.progress.file_log(f"[{self.lib.name}] {line}")
 
     def _open_bar(self) -> None:
         if self._bar is not None or self.total is None:
@@ -467,6 +505,9 @@ class NativeRunner:
     poll_seconds: float = NATIVE_MEMORY_POLL_SECONDS
     max_wait_seconds: float = NATIVE_MEMORY_MAX_WAIT_SECONDS
     mirror_logs: bool = True
+    # Folder exports draw their own progress display: per-library lines and
+    # the nested logs then go to the log file only.
+    quiet: bool = False
     current: NativeLib | None = None
     waiting: tuple[NativeLib, int] | None = None
     current_started: float = 0.0
@@ -530,7 +571,7 @@ class NativeRunner:
                 break
             self.waiting = (lib, available)
             if not logged:
-                self.progress.log(
+                (self.progress.file_log if self.quiet else self.progress.log)(
                     f"native: waiting for memory before {lib.name} ({lib.abi}): "
                     f"{available} MB free, need {self.min_free_mb} MB"
                 )
@@ -544,17 +585,23 @@ class NativeRunner:
             )
 
     def _export_one(self, lib: NativeLib) -> None:
-        out_dir = native_export_dir(self.root, lib)
+        # Folder exports place each library themselves; APK/.NET use native/.
+        out_dir = lib.export_dir or native_export_dir(self.root, lib)
         lib.export_dir = out_dir
         log_path = out_dir / "tocode.log"
         child = Progress(enabled=False)
         child.set_log_path(log_path)
-        self.progress.log(
+        say = self.progress.file_log if self.quiet else self.progress.log
+        say(
             f"native: {lib.name} ({lib.abi}) export started -> "
             f"{_rel(out_dir, self.root)}"
         )
         started = time.monotonic()
-        tail = NestedLogTail(log_path, lib, self.progress) if self.mirror_logs else None
+        tail = (
+            NestedLogTail(log_path, lib, self.progress, echo=not self.quiet)
+            if self.mirror_logs
+            else None
+        )
         self.current = lib
         self.current_started = started
         self.current_tail = tail
@@ -581,14 +628,14 @@ class NativeRunner:
             self.current_tail = None
         lib.seconds = time.monotonic() - started
         if lib.status == "done":
-            self.progress.log(
+            say(
                 f"native: {lib.name} ({lib.abi}) exported with {lib.backend} "
                 f"in {lib.seconds:.1f}s: functions={lib.function_count} "
                 f"failures={lib.failure_count}"
             )
         else:
             self.errors.append(f"{lib.abi}/{lib.name}: {lib.status}")
-            self.progress.log(f"native: {lib.name} ({lib.abi}) {lib.status}")
+            say(f"native: {lib.name} ({lib.abi}) {lib.status}")
 
 
 def extract_native_libs(

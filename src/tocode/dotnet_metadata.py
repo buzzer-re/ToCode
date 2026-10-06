@@ -811,7 +811,13 @@ def resources_json(session: DotnetSession, root: Path) -> dict[str, Any]:
 
 
 def build_dotnet_agents(
-    *, title: str, kind: str, assemblies: list[str], native: bool, native_count: int
+    *,
+    title: str,
+    kind: str,
+    assemblies: list[str],
+    native: bool,
+    native_count: int,
+    origin: str | None = None,
 ) -> str:
     shown = ", ".join(f"`{name}`" for name in assemblies[:8])
     if len(assemblies) > 8:
@@ -822,6 +828,7 @@ def build_dotnet_agents(
         f"You are working inside a ToCode .NET export of `{title}` ({kind}; assemblies: {shown or 'none'}).",
         "Treat the recovered C#, the IL, the metadata, and the extracted resources as evidence for reverse engineering.",
         "",
+        *(["## Origin", "", origin, ""] if origin else []),
         "## Mission",
         "",
         "Reverse the program, answer user questions, or serve as an oracle/helper to the user regarding this recovered source code.",

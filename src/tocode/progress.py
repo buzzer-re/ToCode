@@ -42,8 +42,23 @@ class Progress:
 
     def log(self, message: str) -> None:
         if self.enabled:
-            print(message, file=sys.stderr)
+            writer = getattr(_tqdm, "write", None)
+            if callable(writer):
+                # Prints above any active progress bars instead of through them.
+                writer(message, file=sys.stderr)
+            else:
+                print(message, file=sys.stderr)
         self.file_log(message)
+
+    def new_bar(self, **kwargs: Any) -> Any:
+        """A tqdm bar the caller updates and closes itself (or a no-op)."""
+        tqdm_factory: Any = _tqdm
+        if not self.enabled or tqdm_factory is None:
+            return None
+        kwargs.setdefault("dynamic_ncols", True)
+        kwargs.setdefault("leave", False)
+        kwargs.setdefault("file", sys.stderr)
+        return tqdm_factory(**kwargs)
 
     def file_log(self, message: str) -> None:
         if self.log_path is not None:

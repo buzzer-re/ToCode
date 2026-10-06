@@ -226,3 +226,71 @@ def test_main_dotnet_input_without_libraries_explains_setup(
     # pytest's stdin is not a terminal, so this must fail fast, not prompt.
     assert cli.main(["-q", str(binary)]) == 1
     assert "tocode --setup-dotnet" in capsys.readouterr().err
+
+
+def test_parser_has_folder_flags() -> None:
+    args = build_parser().parse_args(
+        ["--only", "**/a.dylib", "--only", "b*", "--exclude", "x", "--no-managed",
+         "--arch", "arm64", "--plan", "--links-only", "dir"]
+    )  # fmt: skip
+
+    assert args.only == ["**/a.dylib", "b*"] and args.exclude == ["x"]
+    assert args.no_managed and args.arch == "arm64" and args.plan and args.links_only
+    assert build_parser().parse_args(["dir"]).only == []
+
+
+def test_main_routes_a_directory_to_the_folder_export(tmp_path, monkeypatch) -> None:
+    from tocode import cli, folder
+
+    seen = {}
+
+    def fake_export(path, *, options, progress):
+        seen["path"] = path
+        seen["options"] = options
+        return folder.FolderSummary(
+            root_dir=tmp_path / "out", input_dir=path, binaries=0, jobs=[],
+            edges=0, links=0, bound=0, mapped=0,
+        )  # fmt: skip
+
+    monkeypatch.setattr(folder, "export_folder", fake_export)
+
+    code = cli.main(
+        [
+            "--only",
+            "*.dll",
+            "--no-native",
+            "--include-framework",
+            "-j",
+            "2",
+            "-q",
+            str(tmp_path),
+        ]
+    )
+
+    assert code == 0
+    assert seen["path"] == tmp_path.resolve()
+    options = seen["options"]
+    assert options.only == ["*.dll"] and options.native is False
+    assert options.include_framework is True and options.jobs == 2
+    assert options.ensure_dotnet is not None
+
+
+def test_main_rejects_binja_backend_for_folder_input(tmp_path) -> None:
+    from tocode.cli import main
+
+    with pytest.raises(SystemExit) as info:
+        main(["--backend", "binja", str(tmp_path)])
+
+    assert info.value.code == 2
+
+
+def test_main_plans_a_folder_without_writing(tmp_path, capsys) -> None:
+    from link_fixtures import elf, write
+
+    from tocode.cli import main
+
+    write(tmp_path / "app/app", elf(executable=True))
+
+    assert main(["--plan", str(tmp_path / "app")]) == 0
+    assert "1. app" in capsys.readouterr().out
+    assert not (tmp_path / "app_decompiled").exists()

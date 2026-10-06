@@ -818,7 +818,38 @@ class IdaSession:
                 name = self._db.names.get_at(target)
                 if name:
                     imported.add(name)
+        if self._indirect_import_calls():
+            imported.update(self._iat_references(func, imports))
         return sorted(edges), sorted(name for name in imported if name)
+
+    def _indirect_import_calls(self) -> bool:
+        # PE code calls imports through the IAT (``call [__imp_X]``); IDA has
+        # no callee function for that, only an xref to the IAT slot.
+        cached = getattr(self, "_iat_calls", None)
+        if cached is None:
+            fmt = str(self._db.format or "").lower()
+            cached = self._ida_xref is not None and ("pe" in fmt or "portable" in fmt)
+            self._iat_calls = cached
+        return cached
+
+    def _iat_references(self, func: Any, imports: Any) -> set[str]:
+        xref = self._ida_xref
+        names: set[str] = set()
+        ea = int(func.start_ea)
+        end = int(func.end_ea)
+        block = xref.xrefblk_t()
+        while ea < end:
+            ok = block.first_from(ea, xref.XREF_FAR)
+            while ok:
+                target = int(block.to)
+                if target in imports:
+                    names.add(imports[target].name)
+                ok = block.next_from()
+            next_ea = self._ida_bytes.next_head(ea, end)
+            if next_ea <= ea:
+                break
+            ea = next_ea
+        return names
 
     def data_xrefs(self, addresses: Any) -> dict[int, list[tuple[int, bool]]]:
         if self._ida_xref is None:

@@ -104,6 +104,11 @@ class PeInfo:
     strong_name_rva: int = 0
     managed_native_header_rva: int = 0
     streams: list[MetadataStream] = field(default_factory=list)
+    # (rva, size) per IMAGE_DIRECTORY_ENTRY_*; used by the folder link parser.
+    data_directories: list[tuple[int, int]] = field(default_factory=list)
+    size_of_headers: int = 0
+    characteristics: int = 0  # IMAGE_FILE_* (0x2000 = DLL)
+    entry_point_rva: int = 0
 
     @property
     def is_managed(self) -> bool:
@@ -139,6 +144,10 @@ class PeInfo:
         return names
 
     def rva_to_offset(self, rva: int) -> int | None:
+        if 0 <= rva < self.size_of_headers and all(
+            rva < section.virtual_address for section in self.sections
+        ):
+            return rva  # inside the headers, which are mapped as-is
         for section in self.sections:
             span = max(section.virtual_size, section.raw_size)
             if section.virtual_address <= rva < section.virtual_address + span:
@@ -161,7 +170,9 @@ def parse_pe(data: bytes | mmap.mmap) -> PeInfo | None:
         if data[pe_offset : pe_offset + 4] != b"PE\0\0":
             return None
         machine, section_count = struct.unpack_from("<HH", data, pe_offset + 4)
-        optional_size = struct.unpack_from("<H", data, pe_offset + 20)[0]
+        optional_size, file_characteristics = struct.unpack_from(
+            "<HH", data, pe_offset + 20
+        )
         optional = pe_offset + 24
         magic = struct.unpack_from("<H", data, optional)[0]
         if magic == 0x20B:
@@ -200,6 +211,13 @@ def parse_pe(data: bytes | mmap.mmap) -> PeInfo | None:
             pe32_plus=pe32_plus,
             image_base=image_base,
             sections=sections,
+            characteristics=file_characteristics,
+            entry_point_rva=struct.unpack_from("<I", data, optional + 16)[0],
+            size_of_headers=struct.unpack_from("<I", data, optional + 60)[0],
+            data_directories=[
+                struct.unpack_from("<II", data, dirs + index * 8)
+                for index in range(min(dirs_count, 16))
+            ],
         )
         if dirs_count > _CLR_DIRECTORY:
             clr_rva, clr_size = struct.unpack_from(

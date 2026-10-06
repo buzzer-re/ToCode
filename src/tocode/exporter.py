@@ -2803,6 +2803,9 @@ def write_project_json(context: ExportContext) -> None:
             "binary": str(analysis.binary.path),
             "backend": context.analyzer.backend_name,
             "decompiler": context.analyzer.decompiler_label,
+            # Base the backend loaded the image at; addresses in this export are
+            # relative to it (folder exports join link-time addresses with it).
+            "image_base": f"0x{analysis.binary.image_base:x}",
             "root_dir": str(root.resolve()),
             "src_dir": str(_need(context.raw_dir).resolve()),
             "raw_src_dir": str(_need(context.raw_dir).resolve()),
@@ -2852,6 +2855,7 @@ def write_manifest(context: ExportContext) -> Path:
             "format": analysis.binary.format_name,
             "arch": analysis.binary.arch,
             "bits": analysis.binary.bits,
+            "image_base": f"0x{analysis.binary.image_base:x}",
             "entrypoints": [f"0x{item:x}" for item in analysis.binary.entrypoints],
             "header": str(_need(context.header_path).resolve()),
             "ida_database": str(context.ida_database)

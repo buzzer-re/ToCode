@@ -95,6 +95,40 @@ def build_parser() -> argparse.ArgumentParser:
         help=".NET input: also decompile .NET framework/runtime assemblies and native runtime libraries found in bundles and packages.",
     )
     parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="Folder input: export only binaries whose path (relative to the folder) matches; '**' crosses directories and a pattern without '/' matches the file name. Repeatable. Other binaries are still scanned and linked.",
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="Folder input: do not export binaries matching this glob (same syntax as --only). Repeatable.",
+    )
+    parser.add_argument(
+        "--no-managed",
+        action="store_true",
+        help="Folder input: do not export .NET assemblies (they are still scanned and linked).",
+    )
+    parser.add_argument(
+        "--arch",
+        default=None,
+        help="Folder input: slice to use from universal (fat) Mach-O files, e.g. arm64 or x86_64 (default: the main executable's).",
+    )
+    parser.add_argument(
+        "--plan",
+        action="store_true",
+        help="Folder input: scan, resolve links, print what would be exported in which order, and exit without decompiling.",
+    )
+    parser.add_argument(
+        "--links-only",
+        action="store_true",
+        help="Folder input: skip decompilation and only recompute mappings.json, per-file links, and source comments over the existing exports.",
+    )
+    parser.add_argument(
         "--no-splits",
         action="store_true",
         help="APK input: export base.apk alone instead of merging sibling split_*.apk files.",
@@ -200,6 +234,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.binja_view is not None and args.all_views:
         parser.error("--binja-view and --all-views cannot be combined")
     if args.backend == "binja":
+        if args.binary is not None and args.binary.is_dir():
+            parser.error(
+                "--backend binja is not supported for folder input; use ida, r2, or angr"
+            )
         if args.binary is not None and is_apk_input(args.binary):
             parser.error(
                 "--backend binja is not supported for APK input; native libraries "
@@ -225,6 +263,8 @@ def main(argv: list[str] | None = None) -> int:
     args.out_dir = (
         args.out_dir.expanduser().resolve() if args.out_dir is not None else None
     )
+    if binary.is_dir():
+        return _run_folder(binary, args=args, progress=progress)
     if is_apk_input(binary):
         return _run_apk(binary, args=args, progress=progress, parser=parser)
     if not args.as_native and binary.is_file() and is_dotnet_input(binary):
@@ -366,6 +406,64 @@ def _run_dotnet(binary: Path, *, args: argparse.Namespace, progress: Progress) -
             print(f"native: {line}", file=sys.stderr)
         print(f"Exported in {_format_duration(time.monotonic() - started)}")
     return 0
+
+
+def _run_folder(folder: Path, *, args: argparse.Namespace, progress: Progress) -> int:
+    from .folder import FolderOptions, export_folder, format_plan
+
+    def ensure_dotnet() -> bool:
+        from .backends import dotnet_libs
+
+        try:
+            dotnet_libs.ensure_libraries(
+                interactive=sys.stdin.isatty() and sys.stderr.isatty(),
+                ask=_ask_on_stderr,
+                log=progress.log,
+            )
+        except ToCodeError as exc:
+            progress.log(f"tocode: .NET assemblies will not be decompiled: {exc}")
+            return False
+        return True
+
+    options = FolderOptions(
+        out_dir=args.out_dir,
+        only=list(args.only),
+        exclude=list(args.exclude),
+        include_framework=args.include_framework,
+        native=not args.no_native,
+        managed=not args.no_managed,
+        ensure_dotnet=ensure_dotnet,
+        arch=args.arch,
+        plan=args.plan,
+        links_only=args.links_only,
+        restart=args.restart,
+        jobs=args.jobs,
+        native_options=_native_options(args),
+    )
+    try:
+        summary = export_folder(folder, options=options, progress=progress)
+    except KeyboardInterrupt:
+        print("tocode: interrupted; rerun the same command to resume", file=sys.stderr)
+        return 130
+    except ToCodeError as exc:
+        progress.log(f"tocode: {exc}")
+        print(f"tocode: {exc}", file=sys.stderr)
+        return 1
+    if summary.plan_only:
+        print(format_plan(summary))
+        return 0
+    if not args.quiet:
+        print(f"Project: {summary.root_dir}")
+        print(
+            f"Summary: binaries={summary.binaries} exported={summary.done} "
+            f"failed={summary.failed} library_refs={summary.edges} "
+            f"imports={summary.links} bound_in_folder={summary.bound} "
+            f"mapped_to_functions={summary.mapped}"
+        )
+        for line in summary.errors:
+            print(f"failed: {line}", file=sys.stderr)
+        print(f"Exported in {_format_duration(summary.seconds)}")
+    return 130 if summary.interrupted else 0
 
 
 def _ask_on_stderr(prompt: str) -> str:
