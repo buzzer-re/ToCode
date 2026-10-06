@@ -540,9 +540,17 @@ def load_runtime() -> dict[str, Any]:
             raise ToCodeError(f"cannot load the .NET runtime: {exc}") from exc
     import clr  # type: ignore[import-not-found]
 
-    for spec in dotnet_libs.LIBRARIES:
-        clr.AddReference(str(library_dir / spec.file_name))
     import System  # type: ignore[import-not-found]
+
+    # Reference by name from a sys.path folder: pythonnet 3.0 (Python 3.10)
+    # rejects full paths in AddReference; 3.1+ accepts both.
+    if str(library_dir) not in sys.path:
+        sys.path.append(str(library_dir))
+    for spec in dotnet_libs.LIBRARIES:
+        try:
+            clr.AddReference(spec.file_name.removesuffix(".dll"))
+        except Exception:
+            System.Reflection.Assembly.LoadFrom(str(library_dir / spec.file_name))
 
     actual = str(System.Environment.Version)
     if _version_tuple(actual)[:1] < (MIN_RUNTIME_MAJOR,):
