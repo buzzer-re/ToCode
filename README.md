@@ -112,21 +112,16 @@ Other disassemblers may be added in the future.
 
 ### .NET assemblies
 
-`tocode App.dll` (also `.exe`, an apphost launcher next to its `.dll`, single-file bundles, and `.nupkg` packages) uses a built-in .NET backend: [dnlib](https://github.com/0xd4d/dnlib) for metadata and [ICSharpCode.Decompiler](https://github.com/icsharpcode/ILSpy) (ILSpy's engine) for C#, loaded through [pythonnet](https://pypi.org/project/pythonnet/). No dnSpy/ILSpy install is needed, only a **.NET 9+ runtime** (e.g. `sudo apt install dotnet-runtime-10.0`, or the SDK; `DOTNET_ROOT` is honoured).
+ToCode decompiles .NET assemblies (`.dll`, `.exe`), single-file bundles, apphost launchers, and NuGet packages to C#, and writes the IL of each type next to it. You need a .NET 9 or newer runtime.
 
-ToCode does not ship these two libraries (both MIT). The first .NET export asks once whether to download them from nuget.org and remembers the answer. Non-interactive runs (agents, CI) are never prompted: run `tocode --setup-dotnet` once instead, which downloads without asking, or re-verifies and repairs an existing install. Each download is checked against SHA-256 hashes pinned in `src/tocode/backends/dotnet_libs.py`, for both the `.nupkg` and the extracted DLL, and the files are re-hashed after being written. They are stored per user in `~/.local/share/tocode/dotnet` (macOS: `~/Library/Application Support/tocode/dotnet`, Windows: `%LOCALAPPDATA%\tocode\dotnet`, override: `TOCODE_DOTNET_LIB_DIR`). Delete that folder to undo the install or reset the remembered answer.
+Decompilation uses [dnlib](https://github.com/0xd4d/dnlib) and [ICSharpCode.Decompiler](https://github.com/icsharpcode/ILSpy), which ToCode doesn't include. The first .NET export asks once whether to download them from nuget.org and checks them against pinned SHA-256 hashes. Scripts and agents can't answer that prompt, so run `tocode --setup-dotnet` beforehand. The files are stored per user (`~/.local/share/tocode/dotnet` on Linux, or `TOCODE_DOTNET_LIB_DIR`); delete that folder to reset.
 
-- `src/raw/<Assembly>/<Namespace>/.../<Type>.cs`: C# per top-level type, folders follow assemblies and namespaces like a dnSpy/ILSpy project export; `<Type>.il` next to it keeps the bytecode (IL with RVA, raw bytes, and metadata tokens per instruction).
-- Per-method C# and IL line ranges in `functions.json`/`function-index.json` (address `<Assembly>!0x<token>`), with lambdas and async/iterator state machines linked to the method that owns them.
-- `assemblies.json`, `types.json`, `strings.json` (user strings with `ldstr` xrefs), `imports.json` (cross-assembly members and P/Invoke), `exports.json`, `reachable.json`, `namespace-graph.json`, `resources.json`, `container.json`, `triage.json` (P/Invoke, suspicious API families, obfuscation hints, strings of interest).
-- Native code goes through the regular native backends on a background thread, like APK `.so` files: mixed-mode (C++/CLI) assemblies, native libraries inside bundles/packages, and P/Invoke targets shipped next to the input. `--no-native` skips it.
-- Single-file bundles and packages carry the .NET runtime/framework; those assemblies and runtime native libraries are listed but only decompiled with `--include-framework`. NuGet packages decompile each assembly once, from its newest target framework.
-- `--as-native` exports a managed PE with the native backend instead (e.g. to look at a ReadyToRun or mixed-mode image in IDA).
+Native code in the program (mixed-mode assemblies, bundled libraries, P/Invoke libraries next to the input) goes to the native backend unless you pass `--no-native`. Bundles and packages carry the .NET runtime itself, which is skipped unless you add `--include-framework`. `--as-native` treats a .NET file as a plain PE.
 
 ```bash
-tocode App.dll                      # assembly (+ P/Invoke libraries next to it)
-tocode publish/App                  # single-file bundle or apphost launcher
-tocode Vendor.Lib.1.0.0.nupkg       # NuGet package
+tocode App.dll
+tocode publish/App               # single-file bundle or apphost
+tocode Vendor.Lib.1.0.0.nupkg
 ```
 
 ### Android APKs
@@ -151,7 +146,16 @@ tocode app.apks --no-native -j 4    # bundle, DEX/Android side only
 
 ToCode supports Windows, Linux, and macOS with Python 3.10 or newer.
 
-On Windows PowerShell:
+Install it from PyPI:
+
+```bash
+pip install tocode-cli              # or: uv tool install tocode-cli
+pip install "tocode-cli[angr]"      # also install the angr fallback backend
+```
+
+The command is `tocode`. You still need a backend (IDA, radare2, angr, or Binary Ninja); see [Supported backends](https://github.com/buzzer-re/ToCode#supported-backends).
+
+To install from a clone of the repository instead, on Windows PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
