@@ -154,9 +154,10 @@ def test_folder_export_links_exports_and_annotates(tmp_path: Path) -> None:
     root = _app(tmp_path / "app")
     exporter = FakeExporter()
 
-    summary = _export(root, tmp_path, exporter)
+    summary = _export(root, tmp_path, exporter, parallel_files=1)
 
-    # Executable first, then what it loads; the bundled libstdc++ is skipped.
+    # One at a time: executable first, then what it loads; the bundled
+    # libstdc++ is skipped.
     assert exporter.calls == ["bin/app", "lib/libfoo.so.1", "lib/libbar.so"]
     statuses = {job.relpath: job.status for job in summary.jobs}
     assert statuses["lib/libstdc++.so.6"] == RUNTIME

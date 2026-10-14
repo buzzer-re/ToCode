@@ -224,7 +224,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--jobs",
         type=parse_jobs,
         default=None,
-        help="Worker sessions for decompilation: positive integer or 'auto' (default: auto).",
+        help="Worker sessions for decompilation: positive integer or 'auto' (default: auto). In a folder export, the workers of each binary.",
+    )
+    parser.add_argument(
+        "-pf",
+        "--parallel-files",
+        type=parse_jobs,
+        default=None,
+        metavar="N",
+        help="Folder input: binaries exported at once, each in its own process with -j workers: positive integer or 'auto' (default: auto, from the CPU count and free memory).",
     )
     parser.add_argument(
         "--tree",
@@ -343,6 +351,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     if binary.is_dir():
         return _run_folder(binary, args=args, progress=progress)
+    if args.parallel_files is not None:
+        parser.error("--parallel-files applies to folder input")
     if is_apk_input(binary):
         return _run_apk(binary, args=args, progress=progress, parser=parser)
     if not args.as_native and binary.is_file() and is_dotnet_input(binary):
@@ -517,6 +527,7 @@ def _run_folder(folder: Path, *, args: argparse.Namespace, progress: Progress) -
         links_only=args.links_only,
         restart=args.restart,
         jobs=args.jobs,
+        parallel_files=args.parallel_files,
         native_options=_native_options(args),
     )
     try:
