@@ -156,6 +156,49 @@ def describe_jobs(
     return f"Workers: {selected} after {analysis_seconds:.2f}s analysis"
 
 
+# Folder exports: binaries exported at once when --parallel-files is auto.
+MAX_AUTO_PARALLEL_FILES = 16
+# With -j auto, each of the parallel files may use at least this many workers.
+# Small binaries (most of a folder) render with one worker anyway; a big one
+# gets a second instead of rendering alone on one CPU at the end.
+MIN_AUTO_WORKERS_PER_FILE = 2
+
+
+def choose_parallel_files(
+    *,
+    pending: int,
+    requested_files: int | None,
+    requested_jobs: int | None,
+    cpu_count: int | None = None,
+    available_memory_mb: int | None = None,
+    file_memory_mb: int = 0,
+) -> tuple[int, int | None]:
+    """How many binaries a folder export runs at once, and the worker cap per file.
+
+    Explicit values are honored (only capped by the number of pending files).
+    Auto runs one file per CPU (one per ``-j`` workers' worth of CPUs when
+    ``-j`` is given), at most ``MAX_AUTO_PARALLEL_FILES``, and no more than
+    free memory holds at ``file_memory_mb`` each. With ``-j`` auto, each file's
+    workers are capped at its share of the CPUs (at least
+    ``MIN_AUTO_WORKERS_PER_FILE``); the cap is None when one file runs at a
+    time, which keeps the export's own choice.
+    """
+    if pending <= 0:
+        return 1, None
+    cpus = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
+    if requested_files is not None:
+        files = requested_files
+    else:
+        files = max(1, cpus // (requested_jobs or 1))
+        files = min(files, MAX_AUTO_PARALLEL_FILES)
+        if available_memory_mb is not None and file_memory_mb > 0:
+            files = min(files, max(1, available_memory_mb // file_memory_mb))
+    files = max(1, min(files, pending))
+    if files == 1 or requested_jobs is not None:
+        return files, None
+    return files, max(MIN_AUTO_WORKERS_PER_FILE, cpus // files)
+
+
 def configured_job_limit() -> int:
     raw = os.environ.get("TOCODE_MAX_DECOMPILE_WORKERS", str(DEFAULT_JOB_LIMIT)).strip()
     try:

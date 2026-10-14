@@ -25,10 +25,12 @@ import posixpath
 import re
 import shutil
 import sys
+import threading
 import time
 from typing import Any, Callable
 
 from .apk_native import (
+    ExportKilledError,
     NativeExporter,
     NativeLib,
     NativeOptions,
@@ -46,7 +48,7 @@ from .links.analyze import FolderLinks, link_folder
 from .links.inventory import JOB_APK, JOB_DOTNET, JOB_NATIVE, Entry, Inventory, scan
 from .metadata import write_json
 from .naming import clean_path_component
-from .parallel import available_memory_mb
+from .parallel import available_memory_mb, choose_parallel_files, configured_job_limit
 from .progress import Progress
 
 STATE_DIR = ".tocode-folder"
@@ -80,6 +82,8 @@ class FolderOptions:
     links_only: bool = False
     restart: bool = False
     jobs: int | None = None
+    # Binaries exported at once (None: auto, from CPUs and free memory).
+    parallel_files: int | None = None
     native_options: NativeOptions = field(default_factory=NativeOptions)
 
 
@@ -303,20 +307,27 @@ def load_state(master: Path) -> dict[str, Any]:
     return payload
 
 
+# Parallel exports finish on their own threads; each saves the state.
+_state_lock = threading.Lock()
+
+
 def save_state(master: Path, jobs: list[FolderJob], state: dict[str, Any]) -> None:
-    recorded = state.setdefault("jobs", {})
-    for job in jobs:
-        if job.status == DONE or job.status.startswith("failed"):
-            recorded[job.relpath] = {
-                "key": job.key,
-                "status": job.status,
-                "backend": job.backend,
-                "decompiler": job.decompiler,
-                "function_count": job.function_count,
-                "failure_count": job.failure_count,
-                "seconds": round(job.seconds, 1) if job.seconds is not None else None,
-            }
-    write_json(state_path(master), state)
+    with _state_lock:
+        recorded = state.setdefault("jobs", {})
+        for job in jobs:
+            if job.status == DONE or job.status.startswith("failed"):
+                recorded[job.relpath] = {
+                    "key": job.key,
+                    "status": job.status,
+                    "backend": job.backend,
+                    "decompiler": job.decompiler,
+                    "function_count": job.function_count,
+                    "failure_count": job.failure_count,
+                    "seconds": round(job.seconds, 1)
+                    if job.seconds is not None
+                    else None,
+                }
+        write_json(state_path(master), state)
 
 
 def apply_state(jobs: list[FolderJob], state: dict[str, Any]) -> None:
@@ -357,6 +368,9 @@ class JobSettings:
     native: bool
     origin: str
     restart: bool
+    # Decompile workers this file may use (its share of the CPUs when several
+    # files run at once and -j is auto); None leaves the export's own choice.
+    max_workers: int | None = None
 
 
 def run_folder_job(
@@ -421,6 +435,10 @@ def _folder_job_child(
     progress = Progress(enabled=False)
     progress.set_log_path(log_path)
     _redirect_output(log_path)
+    if settings.max_workers is not None:
+        os.environ["TOCODE_MAX_DECOMPILE_WORKERS"] = str(
+            min(settings.max_workers, configured_job_limit())
+        )
     try:
         result = run_folder_job(lib, out_dir, settings, progress)
     except ToCodeError as exc:
@@ -640,8 +658,25 @@ def _run_jobs(
         progress.log(f"{reused} binaries already exported and unchanged; skipping them")
     if not pending:
         return
+    min_free = native_min_free_mb()
+    files, max_workers = choose_parallel_files(
+        pending=len(pending),
+        requested_files=options.parallel_files,
+        requested_jobs=options.jobs,
+        available_memory_mb=available_memory_mb(),
+        file_memory_mb=min_free,
+    )
+    if files == 1:
+        how = "one at a time, in load order"
+    else:
+        workers = (
+            f"-j {options.jobs}"
+            if options.jobs is not None
+            else f"up to {max_workers} workers"
+        )
+        how = f"{files} at a time ({workers} each), largest first"
     progress.log(
-        f"Exporting {len(pending)} binaries one at a time, in load order "
+        f"Exporting {len(pending)} binaries {how} "
         f"(backend: {options.native_options.backend}; per-binary logs in tocode.log)"
     )
     by_entry: dict[str, FolderJob] = {}
@@ -661,6 +696,10 @@ def _run_jobs(
         )
         by_entry[job.relpath] = job
         libs.append(lib)
+    if files > 1:
+        # The biggest binaries take longest: starting them first keeps one
+        # from running alone at the end while every other slot sits idle.
+        libs.sort(key=lambda item: item.size, reverse=True)
     native = options.native_options
     native_options = NativeOptions(
         backend=native.backend,
@@ -684,6 +723,7 @@ def _run_jobs(
             native=options.native,
             origin=lib.origin or "",
             restart=options.restart,
+            max_workers=max_workers,
         )
 
     run_one = exporter or isolated_exporter(settings_for)
@@ -697,8 +737,16 @@ def _run_jobs(
         try:
             result = run_one(lib, out_dir, child)
         except BaseException as exc:
-            # Killed by Ctrl-C: stays pending and resumes from its checkpoint.
-            if not (holder and holder[0].stop_event.is_set()):
+            # Killed by Ctrl-C, or killed beside other exports and retried
+            # alone: stays pending and resumes from its checkpoint.
+            runner = holder[0] if holder else None
+            interrupted = runner is not None and runner.stop_event.is_set()
+            retried = (
+                runner is not None
+                and isinstance(exc, ExportKilledError)
+                and runner.claim_retry(lib, exc)
+            )
+            if not (interrupted or retried):
                 job.status = f"failed: {exc}"
             job.seconds = time.monotonic() - started
             save_state(master, jobs, state)
@@ -714,12 +762,13 @@ def _run_jobs(
         root=master,
         progress=progress,
         exporter=tracked,
-        min_free_mb=native_min_free_mb(),
+        min_free_mb=min_free,
         available_memory=available_memory_mb,
         quiet=True,
+        parallel=files,
     )
     holder.append(runner)
-    display = FolderDisplay(progress, pending)
+    display = FolderDisplay(progress, pending, files)
     runner.start()
     thread = runner.thread
     try:
@@ -779,17 +828,80 @@ def _duration(seconds: float) -> str:
     return f"{hours}h{minutes:02d}m"
 
 
+# Running binaries shown with a row each; more are counted on the overall bar.
+MAX_ROWS = 8
+
+
+class _Row:
+    """One running binary's bar: its phase, then functions rendered."""
+
+    def __init__(self, progress: Progress, position: int) -> None:
+        self.progress = progress
+        self.position = position
+        self.name: str | None = None
+        self.bar: Any = None
+        self.total: int | None = None
+
+    def show(self, name: str | None, tail: Any, phase: str | None) -> None:
+        if name != self.name:
+            self.close()
+            self.name = name
+            if name is None:
+                return
+            self._open(None)
+        if self.bar is None:
+            return
+        if tail is not None and tail.total and self.total is None:
+            self.close()
+            self.name = name
+            self._open(tail.total)
+        if self.total is not None and tail is not None:
+            self.bar.n = min(tail.rendered, self.total)
+            self.bar.refresh()
+            return
+        if phase is None:
+            phase = tail.last_line if tail is not None else "starting"
+        self.bar.set_postfix_str(_short(phase, 60), refresh=False)
+        self.bar.refresh()
+
+    def _open(self, total: int | None) -> None:
+        label = "  ↳ " + _short(self.name or "", NAME_WIDTH)
+        self.total = total
+        if total is None:
+            fmt = "{desc}{postfix} [{elapsed}]"  # "  ↳ name, <phase> [time]"
+        else:
+            label = f"{label:<{LABEL_WIDTH}}"
+            fmt = BAR_FORMAT.replace("{unit_label}", "functions")
+        self.bar = self.progress.new_bar(
+            total=total,
+            desc=label,
+            position=self.position,
+            disable=None,
+            bar_format=fmt,
+        )
+
+    def close(self) -> None:
+        if self.bar is not None:
+            self.bar.close()
+        self.bar = None
+        self.total = None
+        self.name = None
+
+
 class FolderDisplay:
     """Progress for many binaries without flooding the terminal.
 
     On a terminal: one bar for the folder (binaries done, failures, ETA) and
-    one for the binary being exported (its phase, then functions rendered).
-    Nested export logs only go to ``tocode.log``; failures are printed above
-    the bars. When stderr is not a terminal: one line per finished binary and
-    a status line every minute.
+    one row per binary being exported (its phase, then functions rendered).
+    Rows keep their place while other exports come and go. Nested export logs
+    only go to ``tocode.log``; failures are printed above the bars. When stderr
+    is not a terminal: one line per finished binary and a status line every
+    minute.
     """
 
-    def __init__(self, progress: Progress, jobs: list[FolderJob]) -> None:
+    def __init__(
+        self, progress: Progress, jobs: list[FolderJob], parallel: int = 1
+    ) -> None:
         self.progress = progress
         self.jobs = jobs
         self.total = len(jobs)
@@ -809,9 +921,8 @@ class FolderDisplay:
         if self.overall is not None and not self.tty:
             self.overall.close()
             self.overall = None
-        self.current: Any = None
-        self.current_name: str | None = None
-        self.current_total: int | None = None
+        rows = max(1, min(parallel, MAX_ROWS))
+        self.rows = [_Row(progress, position) for position in range(1, rows + 1)]
         self.last_text = self.started
 
     def _finished(self) -> list[FolderJob]:
@@ -825,13 +936,15 @@ class FolderDisplay:
             self.reported.add(job.relpath)
             self._report(job, len(self.reported))
         if self.tty and self.overall is not None:
+            running = runner.running()
             failed = sum(1 for job in finished if job.status.startswith("failed"))
+            extra = [f"{failed} failed"] if failed else []
+            if len(running) > len(self.rows):
+                extra.append(f"{len(running)} running")
             self.overall.n = len(finished)
-            self.overall.set_postfix_str(
-                f"{failed} failed" if failed else "", refresh=False
-            )
+            self.overall.set_postfix_str(", ".join(extra), refresh=False)
             self.overall.refresh()
-            self._refresh_current(runner)
+            self._refresh_rows(runner, running)
         elif time.monotonic() - self.last_text >= TEXT_HEARTBEAT_SECONDS:
             self.last_text = time.monotonic()
             status = runner.describe_current()
@@ -851,55 +964,35 @@ class FolderDisplay:
                 f"[{number}/{self.total}] ✓ {job.relpath}: {job.function_count} functions in {took}"
             )
 
-    def _refresh_current(self, runner: NativeRunner) -> None:
-        lib = runner.current
+    def _refresh_rows(self, runner: NativeRunner, running: list[Any]) -> None:
+        wanted: dict[str, tuple[Any, str | None]] = {
+            item.lib.name: (item.tail, None) for item in running[: len(self.rows)]
+        }
         waiting = runner.waiting
-        name = lib.name if lib is not None else (waiting[0].name if waiting else None)
-        if name != self.current_name:
-            self._close_current()
-            self.current_name = name
-            if name is None:
-                return
-            self._open_current(None)
-        tail = runner.current_tail
-        if self.current is None:
-            return
-        if tail is not None and tail.total and self.current_total is None:
-            self._close_current()
-            self._open_current(tail.total)
-        if self.current_total is not None and tail is not None:
-            self.current.n = min(tail.rendered, self.current_total)
-            self.current.refresh()
-            return
-        if waiting is not None:
-            phase = f"waiting for memory ({waiting[1]} MB free, need {runner.min_free_mb} MB)"
-        elif tail is not None:
-            phase = tail.last_line
-        else:
-            phase = "starting"
-        self.current.set_postfix_str(_short(phase, 60), refresh=False)
-        self.current.refresh()
-
-    def _open_current(self, total: int | None) -> None:
-        label = "  ↳ " + _short(self.current_name or "", NAME_WIDTH)
-        self.current_total = total
-        if total is None:
-            fmt = "{desc}{postfix} [{elapsed}]"  # "  ↳ name, <phase> [time]"
-        else:
-            label = f"{label:<{LABEL_WIDTH}}"
-            fmt = BAR_FORMAT.replace("{unit_label}", "functions")
-        self.current = self.progress.new_bar(
-            total=total, desc=label, position=1, disable=None, bar_format=fmt
-        )
-
-    def _close_current(self) -> None:
-        if self.current is not None:
-            self.current.close()
-        self.current = None
-        self.current_total = None
+        if waiting is not None and len(wanted) < len(self.rows):
+            lib, available = waiting
+            wanted.setdefault(
+                lib.name,
+                (
+                    None,
+                    f"waiting for memory ({available} MB free, need "
+                    f"{runner.min_free_mb} MB)",
+                ),
+            )
+        for row in self.rows:
+            if row.name is not None and row.name not in wanted:
+                row.close()
+        # A binary keeps the row it started on; new ones take a free row.
+        for name, (tail, phase) in wanted.items():
+            slot = next((r for r in self.rows if r.name == name), None) or next(
+                (r for r in self.rows if r.name is None), None
+            )
+            if slot is not None:
+                slot.show(name, tail, phase)
 
     def close(self) -> None:
-        self._close_current()
+        for row in self.rows:
+            row.close()
         if self.overall is not None:
             self.overall.close()
             self.overall = None

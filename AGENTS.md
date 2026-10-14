@@ -20,7 +20,7 @@ This repository contains ToCode, a Python-only binary exporter. ToCode takes one
 - `src/tocode/dotnet.py`: .NET export pipeline; `dotnet_metadata.py`: .NET JSON documents and the generated `AGENTS.md`.
 - `src/tocode/apk.py`: APK export pipeline (extraction, decompile pool, resource decoding, metadata); `apk_metadata.py`: manifest parsing and Android JSON documents; `apk_native.py`: extraction and background native export of every `.so`.
 - `src/tocode/links/`: pure-Python link facts for folder exports (no backend involved): `sniff.py` file kinds; `binfmt_elf.py`, `binfmt_pe.py`, `binfmt_macho.py` (thin/fat, chained fixups, bind opcodes, export trie), `binfmt_dotnet.py` (dnlib-free metadata tables, signatures, P/Invoke); `inventory.py` folder scan; `resolve.py` loader rules per platform; `bind.py` symbol binding; `names.py` backend-name matching keys.
-- `src/tocode/folder.py`: folder export orchestration (plan, job keys and resume state in `.tocode-folder/`, one isolated process per binary via `NativeRunner`, the two-bar progress display); `folder_links.py`: joins link facts to the exports (`mappings.json`, per-file enrichment); `folder_annotate.py`: line-stable `tocode-link:` source comments; `folder_docs.py`: master `AGENTS.md`/JSON.
+- `src/tocode/folder.py`: folder export orchestration (plan, job keys and resume state in `.tocode-folder/`, isolated processes per binary run in parallel by `NativeRunner`, the overall bar plus one row per running binary); `folder_links.py`: joins link facts to the exports (`mappings.json`, per-file enrichment); `folder_annotate.py`: line-stable `tocode-link:` source comments; `folder_docs.py`: master `AGENTS.md`/JSON.
 - `src/tocode/exporter.py`: project writer, function rendering, worker-session rendering, generated export `AGENTS.md`.
 - `src/tocode/metadata.py`: JSON metadata and triage documents.
 - `src/tocode/cluster.py`: call-graph clustering.
@@ -100,7 +100,8 @@ Framework/runtime assemblies and native runtime libraries inside bundles and pac
 - Do not commit generated export directories such as `here/`, `ls/`, `*_decompiler/`, or `*_decompiled/`.
 - Folder links must come only from import/load tables and loader rules; never add name-similarity or string-based (`dlopen`/`LoadLibrary`) links. `links/names.py` keys only locate a backend's function for a symbol the tables already bound.
 - Source annotations must never add or remove lines (`folder_annotate` asserts it); line ranges in the JSON depend on it.
-- Folder runs print one overall bar and one current-binary bar; nested export logs go to `tocode.log` only. Keep per-file terminal output to failures.
+- Folder runs export `--parallel-files` binaries at once (auto: one per CPU, capped by free memory at `TOCODE_NATIVE_MIN_FREE_MB` each), largest first, each with `-j` workers (auto: capped at its CPU share through `TOCODE_MAX_DECOMPILE_WORKERS` in the child). `NativeRunner` starts a file only when a slot is free and memory allows it on top of files still ramping up; an export killed by a signal while others ran is retried once, alone. `save_state` is locked (exports finish on their own threads); Ctrl-C kills every running export and leaves it pending, never failed, so a rerun resumes it from its own checkpoint. APK/.NET native libraries still run one at a time (`parallel=1`).
+- Folder runs print one overall bar and one row per running binary; nested export logs go to `tocode.log` only. Keep per-file terminal output to failures.
 
 ## Dependencies
 

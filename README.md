@@ -159,13 +159,14 @@ Game_decompiled/
 
 Inside each export, `imports.json` and `functions.json` carry the same links, and calls into other files get a trailing comment in the decompiled source: `/* tocode-link: foo -> lib/libfoo.so/src/raw/app/x.c:23-45 */`. The comments never add lines, so all line numbers stay valid.
 
-Binaries are exported one at a time, executables first and then the libraries they load. Each runs in its own process, so a crash or out-of-memory kill only fails that file. Re-running the same command skips finished binaries and resumes the rest. Bundled runtimes (VC++/MinGW/libstdc++ copies, the .NET framework) are linked but only decompiled with `--include-framework`. Universal Mach-O files use the main executable's architecture (`--arch` to override).
+Several binaries are exported at once, each in its own process, so a crash or out-of-memory kill only fails that file. `--parallel-files N` sets how many run at once and `-j N` the workers inside each (default: from your CPUs and free memory). Re-running the same command skips finished binaries and resumes the rest. Bundled runtimes (VC++/MinGW/libstdc++ copies, the .NET framework) are linked but only decompiled with `--include-framework`. Universal Mach-O files use the main executable's architecture (`--arch` to override).
 
 ```bash
 tocode --plan Game/                          # list binaries, export order, and links; decompile nothing
 tocode Game/ --only 'bin/*' --only '**/libengine.so'   # export a subset; the rest stays linked
 tocode Game/ --exclude '*.dll'               # skip matches
 tocode Game/ --links-only                    # recompute links over existing exports
+tocode Game/ -pf 8 -j 2                     # 8 binaries at once (--parallel-files), 2 workers each
 ```
 
 ### Using

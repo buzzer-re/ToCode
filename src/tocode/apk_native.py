@@ -265,6 +265,10 @@ def watch_parent(poll_seconds: float = PARENT_POLL_SECONDS) -> None:
     threading.Thread(target=run, name="tocode-parent-watch", daemon=True).start()
 
 
+class ExportKilledError(ToCodeError):
+    """An isolated export process was killed by a signal (usually out of memory)."""
+
+
 _active_children: set[int] = set()
 _active_lock = threading.Lock()
 
@@ -319,7 +323,7 @@ def collect_child_result(
         kill_process_group(process.pid)
         code = process.exitcode
         if code is not None and code < 0:
-            raise ToCodeError(
+            raise ExportKilledError(
                 f"export process was killed by signal {-code} "
                 "(out of memory?); try -j 1 or --no-native"
             )
@@ -491,9 +495,29 @@ class NestedLogTail:
         return self.last_line
 
 
+# A file that just started has not loaded its binary yet: count this much free
+# memory as already taken by it for this long when deciding to start another.
+RAMP_SECONDS = 20.0
+
+
+@dataclass(slots=True)
+class RunningExport:
+    lib: NativeLib
+    started: float
+    tail: NestedLogTail | None = None
+
+
 @dataclass
 class NativeRunner:
-    """Runs the native exports on a background thread."""
+    """Runs the native exports on a background thread.
+
+    Up to ``parallel`` exports run at once, each in its own process (the
+    exporter blocks a thread per export). A new export starts only when a slot
+    is free and the host has ``min_free_mb`` of free memory for it on top of
+    what recently started exports have not claimed yet. An export killed by a
+    signal (the OOM killer) while others ran beside it is retried once, alone;
+    it resumes from its own checkpoint.
+    """
 
     libs: list[NativeLib]
     root: Path
@@ -510,30 +534,49 @@ class NativeRunner:
     # Folder exports draw their own progress display: per-library lines and
     # the nested logs then go to the log file only.
     quiet: bool = False
+    parallel: int = 1
+    ramp_seconds: float = RAMP_SECONDS
     current: NativeLib | None = None
     waiting: tuple[NativeLib, int] | None = None
     current_started: float = 0.0
     current_tail: NestedLogTail | None = None
+    _running: dict[str, RunningExport] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _changed: threading.Event = field(default_factory=threading.Event)
+    _overlapped: set[str] = field(default_factory=set)
+    _retries: set[str] = field(default_factory=set)
+    _alone: set[str] = field(default_factory=set)
+    _decisions: dict[str, bool] = field(default_factory=dict)
+
+    def running(self) -> list[RunningExport]:
+        """The exports running now, oldest first."""
+        with self._lock:
+            return sorted(self._running.values(), key=lambda item: item.started)
 
     def describe_current(self) -> str | None:
         """One line about what the native thread is doing right now."""
         waiting = self.waiting
-        if waiting is not None:
+        running = self.running()
+        if waiting is not None and not running:
             pending, available = waiting
             return (
                 f"native: waiting for memory before {pending.name} ({pending.abi}): "
                 f"{available} MB free, need {self.min_free_mb} MB "
                 "(set TOCODE_NATIVE_MIN_FREE_MB to change)"
             )
-        lib = self.current
-        if lib is None:
+        if not running:
             return None
-        elapsed = time.monotonic() - self.current_started
-        detail = self.current_tail.status() if self.current_tail else "running"
         done = sum(1 for item in self.libs if item.status == "done")
         finished = sum(1 for item in self.libs if item.status not in {"pending"})
+        now = time.monotonic()
+        parts = [
+            f"{item.lib.name} ({item.lib.abi}) "
+            f"{item.tail.status() if item.tail else 'running'}, "
+            f"{now - item.started:.0f}s elapsed"
+            for item in running
+        ]
         return (
-            f"native: {lib.name} ({lib.abi}) {detail}, {elapsed:.0f}s elapsed; "
+            f"native: {'; '.join(parts)}; "
             f"{finished}/{len(self.libs)} libraries finished, {done} exported"
         )
 
@@ -549,18 +592,136 @@ class NativeRunner:
 
     def stop(self) -> None:
         self.stop_event.set()
+        self._changed.set()
         terminate_active_native_children()
 
+    def claim_retry(self, lib: NativeLib, exc: BaseException) -> bool:
+        """Whether a failed export is retried alone (decided once per attempt).
+
+        Only a kill by a signal while other exports ran beside it qualifies,
+        and only once: alone, the export has the memory the others were holding.
+        """
+        with self._lock:
+            decided = self._decisions.get(lib.entry)
+            if decided is not None:
+                return decided
+            retry = (
+                not self.stop_event.is_set()
+                and isinstance(exc, ExportKilledError)
+                and lib.entry in self._overlapped
+                and lib.entry not in self._retries
+            )
+            if retry:
+                self._retries.add(lib.entry)
+                self._alone.add(lib.entry)
+            self._decisions[lib.entry] = retry
+            return retry
+
     def _run(self) -> None:
+        queue = list(self.libs)
+        threads: list[threading.Thread] = []
+        while True:
+            threads = [thread for thread in threads if thread.is_alive()]
+            if self.stop_event.is_set():
+                break
+            with self._lock:
+                running = len(self._running)
+                queue[:0] = [lib for lib in self._requeued() if lib not in queue]
+            if not queue:
+                if running == 0:
+                    break
+                self._wait_for_change()
+                continue
+            lib = queue[0]
+            with self._lock:
+                alone_running = any(entry in self._alone for entry in self._running)
+            if (
+                running >= max(1, self.parallel)
+                or alone_running
+                or (lib.entry in self._alone and running > 0)
+            ):
+                self._wait_for_change()
+                continue
+            if not self._memory_allows(lib, running):
+                continue
+            if self.stop_event.is_set():
+                break
+            queue.pop(0)
+            self._launch(lib, threads)
+        for thread in threads:
+            thread.join()
         for lib in self.libs:
-            if self.stop_event.is_set():
+            if lib.status == "pending":
                 lib.status = "skipped: interrupted"
-                continue
+
+    def _requeued(self) -> list[NativeLib]:
+        """Exports that failed and are claimed for a retry (caller holds the lock)."""
+        return [
+            lib
+            for lib in self.libs
+            if lib.entry in self._alone
+            and lib.status == "pending"
+            and lib.entry not in self._running
+            and lib.seconds is not None
+        ]
+
+    def _wait_for_change(self) -> None:
+        self._changed.wait(self.poll_seconds)
+        self._changed.clear()
+
+    def _memory_allows(self, lib: NativeLib, running: int) -> bool:
+        """True when ``lib`` may start now; otherwise waits a little, returns False."""
+        if self.min_free_mb <= 0:
+            return True
+        if running == 0:
+            # Nothing else runs: wait for memory up to the limit, then go anyway.
             self._wait_for_memory(lib)
-            if self.stop_event.is_set():
-                lib.status = "skipped: interrupted"
-                continue
-            self._export_one(lib)
+            return True
+        now = time.monotonic()
+        with self._lock:
+            ramping = sum(
+                1
+                for item in self._running.values()
+                if now - item.started < self.ramp_seconds
+            )
+        available = self.available_memory()
+        if available is None or available >= self.min_free_mb * (1 + ramping):
+            self.waiting = None
+            return True
+        self.waiting = (lib, available)
+        self._wait_for_change()
+        return False
+
+    def _launch(self, lib: NativeLib, threads: list[threading.Thread]) -> None:
+        self.waiting = None
+        lib.status = "pending"
+        out_dir = lib.export_dir or native_export_dir(self.root, lib)
+        lib.export_dir = out_dir
+        tail = (
+            NestedLogTail(
+                out_dir / "tocode.log", lib, self.progress, echo=not self.quiet
+            )
+            if self.mirror_logs
+            else None
+        )
+        item = RunningExport(lib=lib, started=time.monotonic(), tail=tail)
+        with self._lock:
+            if self._running:
+                self._overlapped.add(lib.entry)
+                self._overlapped.update(self._running)
+            self._running[lib.entry] = item
+            self._decisions.pop(lib.entry, None)
+            self.current = lib
+            self.current_started = item.started
+            self.current_tail = tail
+        thread = threading.Thread(
+            target=self._export_one,
+            args=(item,),
+            name=f"tocode-native-{lib.stem}",
+            daemon=True,
+        )
+        threads.append(thread)
+        thread.start()
 
     def _wait_for_memory(self, lib: NativeLib) -> None:
         if self.min_free_mb <= 0:
@@ -586,35 +747,28 @@ class NativeRunner:
                 f"native: waited {waited:.0f}s for memory before {lib.name}"
             )
 
-    def _export_one(self, lib: NativeLib) -> None:
+    def _export_one(self, item: RunningExport) -> None:
         # Folder exports place each library themselves; APK/.NET use native/.
+        lib = item.lib
         out_dir = lib.export_dir or native_export_dir(self.root, lib)
-        lib.export_dir = out_dir
-        log_path = out_dir / "tocode.log"
         child = Progress(enabled=False)
-        child.set_log_path(log_path)
+        child.set_log_path(out_dir / "tocode.log")
         say = self.progress.file_log if self.quiet else self.progress.log
         say(
             f"native: {lib.name} ({lib.abi}) export started -> "
             f"{_rel(out_dir, self.root)}"
         )
-        started = time.monotonic()
-        tail = (
-            NestedLogTail(log_path, lib, self.progress, echo=not self.quiet)
-            if self.mirror_logs
-            else None
-        )
-        self.current = lib
-        self.current_started = started
-        self.current_tail = tail
+        tail = item.tail
         if tail is not None:
             tail.start()
+        retry = False
         try:
             backend, decompiler, functions, failures = self.exporter(
                 lib, out_dir, child
             )
         except ToCodeError as exc:
-            lib.status = f"failed: {exc}"
+            retry = self.claim_retry(lib, exc)
+            lib.status = "pending" if retry else f"failed: {exc}"
         except Exception as exc:  # pragma: no cover - backend crash isolation
             lib.status = f"failed: {type(exc).__name__}: {exc}"
         else:
@@ -626,10 +780,21 @@ class NativeRunner:
         finally:
             if tail is not None:
                 tail.stop()
-            self.current = None
-            self.current_tail = None
-        lib.seconds = time.monotonic() - started
-        if lib.status == "done":
+            lib.seconds = time.monotonic() - item.started
+            with self._lock:
+                self._running.pop(lib.entry, None)
+                if self.current is lib:
+                    self.current = None
+                    self.current_tail = None
+                if not retry:
+                    self._alone.discard(lib.entry)
+            self._changed.set()
+        if retry:
+            say(
+                f"native: {lib.name} ({lib.abi}) was killed while other exports ran; "
+                "retrying it alone"
+            )
+        elif lib.status == "done":
             say(
                 f"native: {lib.name} ({lib.abi}) exported with {lib.backend} "
                 f"in {lib.seconds:.1f}s: functions={lib.function_count} "
