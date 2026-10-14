@@ -29,7 +29,7 @@ area you are changing:
 | IDA | IDA Pro 9 with idalib | `ida-domain`/`idapro` come with ToCode; IDA is found via `IDADIR`, `--idadir`, or common install paths. |
 | radare2 | `r2` plus r2ghidra (`r2pm -ci r2ghidra r2ghidra-sleigh`) | Used by `--backend r2` and as the `auto` fallback. |
 | angr | `uv sync --extra angr` | Large; tests in `tests/test_angr_backend.py` skip without it. |
-| Binary Ninja | Binary Ninja with binja-headless | See the Binary Ninja section of the README. |
+| Binary Ninja | A license that allows headless use (the API is found via `--binja-dir`, `TOCODE_BINJA_DIR`, or `install_api.py`'s `.pth`), or Binary Ninja 6+ with its MCP server on (binja-headless for older versions) | See the Binary Ninja section of the README. `tests/test_binja_headless.py` runs against a fake API in `tests/fake_binja/`, `tests/test_binja_mcp.py` against a fake MCP server. |
 | Android | nothing extra (`droidasc` is a core dependency) | Real APK test: set `TOCODE_TEST_APK=/path/to/app.apk`. |
 | .NET | a .NET 9+ runtime, then `uv run tocode --setup-dotnet` | The SDK (`dotnet-sdk-10.0`) lets you build test assemblies. Real test: `TOCODE_TEST_DOTNET=/path/to/App.dll`. |
 
@@ -74,7 +74,28 @@ uv run tocode /bin/true -o /tmp/tocode-check --backend auto -j 2
 
 Confirm the tree matches the export contract in `AGENTS.md`, `tocode.log` has
 no tracebacks, and `export-manifest.json` reports no unexpected failures. Never
-commit export directories (`*_decompiler/` and similar).
+commit export directories (`*_decompiler/`, `*_decompiled/`, and similar).
+
+For folder mode, build a small folder whose links you know and check that
+every expected link lands on the right file and line range:
+
+- Linux: an executable with `-Wl,-rpath,'$ORIGIN/../lib'`, a library with a
+  version script and `RUNPATH $ORIGIN`, and one library only reachable by
+  SONAME.
+- Windows (`apt install gcc-mingw-w64`): an `.exe` and DLLs with a `.def`
+  forwarder, a `NONAME` ordinal export, a delay import (`dlltool -y`), and a
+  32-bit binary next to 64-bit DLLs.
+- .NET: `dotnet publish` of a console app referencing a class library with
+  overloads and a `[DllImport]` into a gcc-built `.so`.
+
+```bash
+uv run tocode --plan path/to/folder          # facts only, no decompilation
+uv run tocode path/to/folder -j 2
+uv run tocode path/to/folder --links-only    # must leave files unchanged when run twice
+```
+
+`tests/link_fixtures.py` builds the same shapes synthetically for the unit
+tests.
 
 ## Dependencies
 

@@ -100,19 +100,24 @@ def choose_backend(
     input_path: Path | None = None,
     idadir: Path | None = None,
     ida_domain_path: Path | None = None,
+    binja_dir: Path | None = None,
+    skip: frozenset[str] = frozenset(),
 ) -> BackendChoice:
     if input_path is not None and is_ida_database(input_path):
         if requested in {"r2", "angr", "binja"}:
             raise ToCodeError("IDA database input requires the IDA backend")
         requested = "ida"
+    if input_path is not None and is_binja_database(input_path):
+        if requested in {"r2", "angr", "ida"}:
+            raise ToCodeError(
+                "Binary Ninja database (.bndb) input requires the binja backend"
+            )
+        requested = "binja"
 
     if requested == "binja":
-        # binja is satisfied either by a local ``binaryninja`` (running inside the
-        # Binary Ninja UI) or by an RPyc connection to binja-headless. Neither is
-        # checked here: the in-UI session is constructed with an injected view,
-        # and the headless connection's real failure surfaces with a clear
-        # message at connect time. ``auto`` never picks binja -- it requires a
-        # running Binary Ninja, so it stays opt-in.
+        # Satisfied by the local Binary Ninja API (headless, chosen in
+        # create_analyzer when a file is given), by a view injected from the
+        # Binary Ninja UI, or by the MCP/RPyc routes the CLI drives itself.
         return BackendChoice(requested, "binja", "selected by CLI")
 
     if requested == "r2":
@@ -137,9 +142,18 @@ def choose_backend(
             raise ToCodeError(f"IDA backend requested but unavailable: {probe.reason}")
         return BackendChoice(requested, "ida", probe.reason)
 
-    # auto: prefer IDA, then radare2, then angr as a last resort.
+    # auto: prefer IDA, then the Binary Ninja API, then radare2, then angr as a
+    # last resort. A Binary Ninja license that does not allow headless use is
+    # only detected when the file is opened; create_analyzer then retries with
+    # binja in ``skip``.
     if probe.available:
         return BackendChoice(requested, "ida", probe.reason)
+    if "binja" not in skip and probe_binja_headless(binja_dir):
+        return BackendChoice(
+            requested,
+            "binja",
+            f"IDA unavailable ({probe.reason}); using the Binary Ninja Python API",
+        )
     if probe_r2():
         return BackendChoice(
             requested, "r2", f"IDA unavailable ({probe.reason}); using r2"
@@ -169,13 +183,95 @@ def probe_angr() -> bool:
 
 def probe_binja() -> bool:
     # Advisory only: true when running inside (or alongside) a Binary Ninja that
-    # exposes the ``binaryninja`` module locally. The headless path needs ``rpyc``
-    # instead, so binja selection is explicit rather than auto-probed.
+    # exposes the ``binaryninja`` module locally.
+    return importlib.util.find_spec("binaryninja") is not None
+
+
+def discover_binja_dir(explicit: Path | None = None) -> Path | None:
+    """Binary Ninja's ``python`` folder (holding the ``binaryninja`` package)."""
+    candidates: list[Path] = []
+    if explicit is not None:
+        candidates.append(explicit.expanduser())
+    for env_name in ("TOCODE_BINJA_DIR", "BN_INSTALL_DIR", "BINJA_DIR"):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            candidates.append(Path(value).expanduser())
+    # Binary Ninja's own install_api.py writes the path into a .pth file in the
+    # user site-packages of the Python it was run with; reuse it from any Python.
+    candidates.extend(_binaryninja_pth_paths())
+    home = Path.home()
+    candidates.extend(
+        [
+            home / "binaryninja",
+            home / "Applications" / "Binary Ninja.app" / "Contents" / "Resources",
+            Path("/Applications/Binary Ninja.app/Contents/Resources"),
+            Path("/opt/binaryninja"),
+        ]
+    )
+    for env_name in ("ProgramFiles", "LOCALAPPDATA"):
+        root = os.environ.get(env_name)
+        if root:
+            candidates.append(Path(root) / "Vector35" / "BinaryNinja")
+    for candidate in candidates:
+        for python_dir in (candidate, candidate / "python"):
+            if (python_dir / "binaryninja" / "__init__.py").is_file():
+                return python_dir.resolve()
+    return None
+
+
+def _binaryninja_pth_paths() -> list[Path]:
+    found: list[Path] = []
+    roots: list[Path] = []
+    for pattern in (
+        ".local/lib/python3*/site-packages",
+        "Library/Python/3*/lib/python/site-packages",
+    ):
+        roots.extend(Path.home().glob(pattern))
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        roots.extend(Path(appdata).glob("Python/Python3*/site-packages"))
+    for root in roots:
+        pth = root / "binaryninja.pth"
+        try:
+            lines = pth.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        found.extend(Path(line.strip()) for line in lines if line.strip())
+    return found
+
+
+def bootstrap_binja(explicit: Path | None = None) -> Path | None:
+    """Make ``import binaryninja`` work; returns the python folder used."""
+    if importlib.util.find_spec("binaryninja") is not None:
+        return None
+    python_dir = discover_binja_dir(explicit)
+    if python_dir is not None:
+        _prepend(python_dir)
+    return python_dir
+
+
+def probe_binja_headless(explicit: Path | None = None) -> bool:
+    """True when the Binary Ninja Python API can be imported (cheap: no import).
+
+    Whether the license allows headless use is only known when a file is
+    opened; ``auto`` then falls back to the next backend.
+    """
+    if os.environ.get("TOCODE_DISABLE_BINJA_HEADLESS", "").strip() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return False
+    bootstrap_binja(explicit)
     return importlib.util.find_spec("binaryninja") is not None
 
 
 def is_ida_database(path: Path) -> bool:
     return path.suffix.lower() in IDA_DATABASE_SUFFIXES
+
+
+def is_binja_database(path: Path) -> bool:
+    return path.suffix.lower() == ".bndb"
 
 
 @dataclass(slots=True)

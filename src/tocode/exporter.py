@@ -75,10 +75,14 @@ DEFAULT_FUNCTION_TIMEOUT_SECONDS = 300
 DEFAULT_MAX_FUNCTION_BYTES = 2 * 1024 * 1024
 # Backends whose per-function rendering runs in a spawned worker so a hung
 # decompilation can be timed out. A worker reconstructs the session from the
-# binary path, so "binja" is deliberately excluded: it renders against a live
-# BinaryView / RPyc connection that cannot be pickled into a subprocess, and
-# must therefore stay on the in-process serial path (_render_serial).
-TIMEOUT_WORKER_BACKENDS = frozenset({"ida", "r2", "angr"})
+# binary path (or database). Binary Ninja over the UI, MCP, or RPyc ("binja")
+# is deliberately excluded: it renders against a live view that cannot be
+# pickled into a subprocess and stays on the in-process serial path. Headless
+# Binary Ninja reopens its .bndb in each worker ("binja-headless").
+TIMEOUT_WORKER_BACKENDS = frozenset({"ida", "r2", "angr", "binja-headless"})
+# Backends whose workers each load the whole database: worker count is capped
+# by available memory.
+MEMORY_BOUND_BACKENDS = frozenset({"ida", "binja-headless"})
 TREE_CALLING_CONVENTION_RX = re.compile(
     r"\b__(?:cdecl|fastcall|stdcall|thiscall|usercall|userpurge|noreturn)\b"
 )
@@ -576,6 +580,7 @@ class WorkerSpec:
     ida_domain_path: Path | None = None
     db_path: Path | None = None
     copy_db: bool = True
+    binja_dir: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -752,24 +757,36 @@ def _select_render_workers(context: ExportContext) -> None:
     count = len(context.addresses)
     if context.analyzer.supports_parallel:
         context.requested_jobs = context.jobs
-        is_ida = context.analyzer.backend_name == "ida"
+        worker_backend = _worker_backend(context.analyzer)
+        memory_bound = worker_backend in MEMORY_BOUND_BACKENDS
         context.worker_count = choose_jobs(
             function_count=count,
             analysis_seconds=context.analyzer.analysis_seconds,
             requested=context.jobs,
-            backend=context.analyzer.backend_name,
-            available_memory_mb=available_memory_mb() if is_ida else None,
+            backend=worker_backend,
+            available_memory_mb=available_memory_mb() if memory_bound else None,
             database_size_mb=_worker_database_size_mb(context.analyzer)
-            if is_ida
+            if memory_bound
             else None,
+            measured_worker_memory_mb=_measured_worker_memory_mb(context.analyzer),
         )
         context.render_mode = "process" if context.worker_count > 1 else "single"
-        if is_ida and context.jobs is not None and context.worker_count < context.jobs:
+        if (
+            memory_bound
+            and context.jobs is not None
+            and context.worker_count < context.jobs
+        ):
+            label = "IDA" if worker_backend == "ida" else "Binary Ninja"
+            variable = (
+                "TOCODE_IDA_WORKER_MEMORY_MB"
+                if worker_backend == "ida"
+                else "TOCODE_BINJA_WORKER_MEMORY_MB"
+            )
             context.progress.log(
                 f"Note: limiting to {context.worker_count} worker(s) instead of the "
                 f"requested {context.jobs} to fit available memory "
-                f"(each IDA worker loads the whole database; override with "
-                f"TOCODE_IDA_WORKER_MEMORY_MB)."
+                f"(each {label} worker loads the whole database; override with "
+                f"{variable})."
             )
         context.progress.log(
             describe_jobs(
@@ -777,7 +794,7 @@ def _select_render_workers(context: ExportContext) -> None:
                 analysis_seconds=context.analyzer.analysis_seconds,
                 requested=context.jobs,
                 selected=context.worker_count,
-                backend=context.analyzer.backend_name,
+                backend=worker_backend,
             )
         )
     else:
@@ -1078,7 +1095,7 @@ def render_and_write_source_tree_parallel(
     total = sum(len(cluster.members) for cluster in clusters)
     if progress is not None:
         progress.log(f"Opening {worker_count} streaming workers for {total} functions")
-        progress.log("Preparing IDA worker database copies")
+        progress.log("Preparing worker databases")
     analyzer.prepare_parallel_workers()
     spec = _worker_spec(analyzer, copy_db=worker_count > 1)
     if progress is not None:
@@ -1086,7 +1103,7 @@ def render_and_write_source_tree_parallel(
     analyzer.release_parallel_resources()
     if progress is not None:
         progress.log(
-            "Starting streaming worker processes; opening IDA databases may take a while"
+            "Starting streaming worker processes; opening their databases may take a while"
         )
 
     sources: list[Path] = []
@@ -1614,9 +1631,14 @@ def _max_function_bytes() -> int:
     return _env_int("TOCODE_MAX_FUNCTION_BYTES", DEFAULT_MAX_FUNCTION_BYTES)
 
 
+def _worker_backend(analyzer: BinaryAnalyzer) -> str:
+    session = getattr(analyzer, "session", None)
+    return str(getattr(session, "worker_backend", None) or analyzer.backend_name)
+
+
 def _uses_timeout_worker(analyzer: BinaryAnalyzer) -> bool:
     return (
-        analyzer.backend_name in TIMEOUT_WORKER_BACKENDS
+        _worker_backend(analyzer) in TIMEOUT_WORKER_BACKENDS
         and _function_timeout_seconds() > 0
     )
 
@@ -1977,13 +1999,14 @@ def _render_parallel(
 def _worker_spec(analyzer: BinaryAnalyzer, *, copy_db: bool = True) -> WorkerSpec:
     session = analyzer.session
     return WorkerSpec(
-        backend=analyzer.backend_name,
+        backend=_worker_backend(analyzer),
         binary=analyzer.binary,
         analysis_command=getattr(session, "analysis_command", None),
         idadir=getattr(session, "idadir", None),
         ida_domain_path=getattr(session, "ida_domain_path", None),
         db_path=_session_database_path(session),
         copy_db=copy_db,
+        binja_dir=getattr(session, "binja_dir", None),
     )
 
 
@@ -1994,7 +2017,7 @@ def _worker_database_size_mb(analyzer: BinaryAnalyzer) -> int | None:
     (such as a kernel `.i64`) does not spawn more workers than RAM can hold.
     """
     session = analyzer.session
-    candidate = getattr(session, "_cache_db", None)
+    candidate = _session_database_path(session)
     if candidate is None:
         binary = getattr(session, "binary", None)
         if binary is not None and is_ida_database(Path(binary)):
@@ -2006,6 +2029,11 @@ def _worker_database_size_mb(analyzer: BinaryAnalyzer) -> int | None:
     except OSError:
         return None
     return max(1, size // (1024 * 1024))
+
+
+def _measured_worker_memory_mb(analyzer: BinaryAnalyzer) -> int | None:
+    measure = getattr(getattr(analyzer, "session", None), "worker_memory_mb", None)
+    return measure() if callable(measure) else None
 
 
 def _session_database_path(session: object) -> Path | None:
@@ -2062,10 +2090,23 @@ def _open_worker(spec: WorkerSpec):
 
         session = AngrSession(spec.binary)
         session.analyze()
+    elif spec.backend == "binja-headless":
+        # Each worker opens the parent's .bndb (the cached analysis or the input
+        # database) read-only; Binary Ninja databases can be opened by several
+        # processes, so no per-worker copy is needed.
+        from .backends.binja_headless import BinjaHeadlessSession
+
+        session = BinjaHeadlessSession(
+            spec.binary,
+            binja_dir=spec.binja_dir,
+            db_path=spec.db_path,
+            save_cache=False,
+        )
+        session.analyze()
     elif spec.backend == "binja":
-        # Unreachable in practice: binja renders against a live, non-picklable
-        # session (parallel_safe=False and absent from TIMEOUT_WORKER_BACKENDS),
-        # so it never spawns a worker. Fail loudly if that invariant ever breaks.
+        # Unreachable in practice: UI/MCP/RPyc binja renders against a live,
+        # non-picklable session (parallel_safe=False and absent from
+        # TIMEOUT_WORKER_BACKENDS). Fail loudly if that invariant ever breaks.
         raise RuntimeError("binja backend renders serially; workers unsupported")
     else:
         raise RuntimeError(f"unsupported backend for worker: {spec.backend}")
@@ -2471,7 +2512,10 @@ def _write_metadata(context: ExportContext) -> None:
 
     def write_variables() -> None:
         context.data_variable_count = export_variables(
-            analysis, root, entropy=context.entropy_enabled
+            analysis,
+            root,
+            entropy=context.entropy_enabled,
+            reader=getattr(context.analyzer.session, "read_bytes", None),
         )
 
     def write_indexes() -> None:
@@ -2613,7 +2657,7 @@ def publish_backend_database(context: ExportContext) -> Path | None:
         _copy_file_with_progress(
             source, target, context.progress, desc="saving database"
         )
-    context.progress.log(f"Saved IDA database to {target}")
+    context.progress.log(f"Saved {context.analyzer.backend_label} database to {target}")
     return target.resolve()
 
 
@@ -2803,6 +2847,9 @@ def write_project_json(context: ExportContext) -> None:
             "binary": str(analysis.binary.path),
             "backend": context.analyzer.backend_name,
             "decompiler": context.analyzer.decompiler_label,
+            # Base the backend loaded the image at; addresses in this export are
+            # relative to it (folder exports join link-time addresses with it).
+            "image_base": f"0x{analysis.binary.image_base:x}",
             "root_dir": str(root.resolve()),
             "src_dir": str(_need(context.raw_dir).resolve()),
             "raw_src_dir": str(_need(context.raw_dir).resolve()),
@@ -2852,6 +2899,7 @@ def write_manifest(context: ExportContext) -> Path:
             "format": analysis.binary.format_name,
             "arch": analysis.binary.arch,
             "bits": analysis.binary.bits,
+            "image_base": f"0x{analysis.binary.image_base:x}",
             "entrypoints": [f"0x{item:x}" for item in analysis.binary.entrypoints],
             "header": str(_need(context.header_path).resolve()),
             "ida_database": str(context.ida_database)
@@ -2959,6 +3007,7 @@ def build_export_agents(
         "- `tocode.log`: export, checkpoint, resume, and per-function render history.",
         "- `CLAUDE.md`: Claude entrypoint that references `AGENTS.md`.",
         "- `<binary>.i64` or `<binary>.idb`: exported IDA database when the IDA backend was used.",
+        "- `<binary>.bndb`: exported Binary Ninja database when the headless Binary Ninja backend was used.",
         "",
         "## Working Style",
         "",

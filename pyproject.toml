@@ -72,8 +72,8 @@ angr = [
 ]
 # The Binary Ninja backend's headless client (rpyc) is a core runtime dependency
 # above so `tocode --backend binja` works out of the box. The binaryninja module
-# itself is provided by the Binary Ninja install (in-UI) or the remote VM via
-# binja-headless, so it is intentionally not a pip dependency.
+# itself is provided by the Binary Ninja install (headless or in-UI) or the
+# remote VM via binja-headless, so it is intentionally not a pip dependency.
 
 # angr is an optional backend dependency, so it may be absent from the type
 # checking environment. Ignore its missing stubs/imports rather than failing.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+
 from bisect import bisect_right
 from collections import Counter, deque
 import math
@@ -347,18 +349,35 @@ def export_variables(
     root: Path,
     *,
     entropy: bool = True,
+    reader: Callable[[int, int], bytes | None] | None = None,
 ) -> int:
+    """Write ``data/*.bin`` and the variables documents.
+
+    ``reader(address, size)`` reads section bytes from the backend's own view
+    when the input file is not a plain binary on this machine (a Binary Ninja
+    database reached over MCP); otherwise sections are read from the file at
+    their file offsets.
+    """
     data_dir = root / "data"
     sections: list[dict[str, object]] = []
-    with analysis.binary.path.open("rb") as handle:
+    with contextlib.ExitStack() as stack:
+        handle = (
+            None
+            if reader is not None
+            else stack.enter_context(analysis.binary.path.open("rb"))
+        )
         for segment in analysis.segments:
             if max(segment.vsize, segment.size) <= 0:
                 continue
             file_name = None
             if segment.size > 0:
                 file_name = f"{clean_path_component(segment.name)}.bin"
-                handle.seek(segment.paddr)
-                blob = handle.read(segment.size)
+                if handle is not None:
+                    handle.seek(segment.paddr)
+                    blob = handle.read(segment.size)
+                else:
+                    assert reader is not None
+                    blob = reader(segment.vaddr, segment.size) or b""
                 (data_dir / file_name).write_bytes(blob)
                 if blob and entropy:
                     segment.entropy = round(shannon_entropy(blob), 6)

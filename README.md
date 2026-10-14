@@ -1,6 +1,6 @@
 # ToCode
 
-ToCode exports a binary, IDA database, Android APK, or .NET assembly into a source-like project tree: raw recovered C (Java for APKs, C# and IL for .NET), matching assembly, function summaries, section data, optional IDA database, and metadata that coding agents can read directly.
+ToCode exports a binary, IDA database, Android APK, .NET assembly, or a whole application folder into a source-like project tree: raw recovered C (Java for APKs, C# and IL for .NET), matching assembly, function summaries, section data, optional IDA database, and metadata that coding agents can read directly.
 
 ## Why
 
@@ -92,11 +92,12 @@ sample_decompiler/
 
 ### Supported backends
 
-Three backends are supported, selected with `--backend` (default `auto`, which prefers them in this order):
+Four backends are supported, selected with `--backend` (default `auto`, which prefers them in this order):
 
 1. **IDA** – uses the ida-domain/idapro Python libraries (best decompilation quality).
-2. **radare2** – uses r2pipe with the r2ghidra decompiler.
-3. **angr** – a pure-Python fallback with no external tooling, so ToCode still runs when neither IDA nor radare2 is available. It is an optional extra (it is large: ~450 MB of native dependencies), so it is not installed by default. Get it in any of these ways:
+2. **Binary Ninja** – uses the Binary Ninja Python API when your license allows headless use. `--backend binja` can also export what you have open in a running Binary Ninja (any license). See [Binary Ninja](#binary-ninja) below.
+3. **radare2** – uses r2pipe with the r2ghidra decompiler.
+4. **angr** – a pure-Python fallback with no external tooling, so ToCode still runs when neither IDA nor radare2 is available. It is an optional extra (it is large: ~450 MB of native dependencies), so it is not installed by default. Get it in any of these ways:
 
    ```bash
    bash ./install.sh --all                        # recommended: installs every backend
@@ -105,8 +106,6 @@ Three backends are supported, selected with `--backend` (default `auto`, which p
    ```
 
    The angr export is structurally identical to the others (same files and metadata); its pseudo-C is lower quality than Hex-Rays or r2ghidra.
-
- 4. **Binary Ninja**, is opt-in (`--backend binja`) and never chosen by `auto`, because it drives a running Binary Ninja instead of reading a file. See [Binary Ninja](#binary-ninja) below.
 
 Other disassemblers may be added in the future.
 
@@ -131,7 +130,7 @@ tocode Vendor.Lib.1.0.0.nupkg
 - `src/raw/<package>/<Class>.java`: one decompiled Java file per class, folders follow Java packages (no clustering, no summaries).
 - `AndroidManifest.xml` + `manifest.json`: decoded and parsed manifest (permissions, components with intent filters and exported state, application attributes, split manifests).
 - `classes.json`, `functions.json`, `function-index.json`, `strings.json`, `imports.json`, `exports.json` (exported components + JNI methods), `reachable.json` (from manifest components), `package-graph.json`, `sections.json`, `triage.json`.
-- `lib/<abi>/*.so`: every native library extracted; `native/<abi>/<lib>/`: a complete nested ToCode export per library (all ABIs), produced on a background thread while the DEX side decompiles. `native-libs.json` records the status of each (each library runs in its own process; one failing or being OOM-killed never fails the APK export, and the native thread waits for `TOCODE_NATIVE_MIN_FREE_MB`, default 1024 MB, of free memory before each library). Pass `--no-native` to skip the native decompilation (libraries are still extracted). `--backend` picks the native backend (`auto`/`ida`/`r2`/`angr`; `binja` is not supported for APKs).
+- `lib/<abi>/*.so`: every native library; `native/<abi>/<lib>/`: a full ToCode export of each one, made while the DEX side decompiles. `native-libs.json` records the status of each; a library that fails never fails the APK export. `--no-native` skips them, and `--backend` picks their backend.
 - `data/apk/**`: every other APK entry verbatim; `data/res/**/*.xml` and `data/resources.json`: decoded binary XML and `resources.arsc`.
 
 `base.apk` automatically merges sibling `split_*.apk` files (config and ABI splits) into the same project; `--no-splits` exports it alone. The default output directory is `<manifest package>_decompiler`.
@@ -141,6 +140,33 @@ tocode base.apk                     # DEX + all splits + native libs (IDA/r2/ang
 tocode app.apks --no-native -j 4    # bundle, DEX/Android side only
 ```
 
+
+### Folders
+
+Point `tocode` at a directory (a game folder, a Linux app, a macOS `.app` bundle, a .NET publish folder) and it exports every binary in it, then links them together.
+
+The links come from the binaries themselves: import and load tables, resolved with each platform's loader rules (`@rpath`/`@loader_path` on macOS, `RPATH`/`RUNPATH` and symbol versions on Linux, the application directory and forwarders on Windows, AssemblyRef/MemberRef signatures and P/Invoke for .NET). ToCode never matches by name similarity. When the executable calls `foo` from `libfoo.so`, the link tells you which file defines it and the file and line range of that function in the library's export.
+
+```text
+Game_decompiled/
+  AGENTS.md, CLAUDE.md, project.json, export-manifest.json, tocode.log
+  inventory.json          # every file: kind, arch, hash, export status
+  dependency-graph.json   # which file loads which, and the loader rule used
+  mappings.json           # every import -> defining file, function, line range; its call sites
+  bin/game/               # one regular export per binary, mirroring the folder
+  lib/libengine.so/
+```
+
+Inside each export, `imports.json` and `functions.json` carry the same links, and calls into other files get a trailing comment in the decompiled source: `/* tocode-link: foo -> lib/libfoo.so/src/raw/app/x.c:23-45 */`. The comments never add lines, so all line numbers stay valid.
+
+Binaries are exported one at a time, executables first and then the libraries they load. Each runs in its own process, so a crash or out-of-memory kill only fails that file. Re-running the same command skips finished binaries and resumes the rest. Bundled runtimes (VC++/MinGW/libstdc++ copies, the .NET framework) are linked but only decompiled with `--include-framework`. Universal Mach-O files use the main executable's architecture (`--arch` to override).
+
+```bash
+tocode --plan Game/                          # list binaries, export order, and links; decompile nothing
+tocode Game/ --only 'bin/*' --only '**/libengine.so'   # export a subset; the rest stays linked
+tocode Game/ --exclude '*.dll'               # skip matches
+tocode Game/ --links-only                    # recompute links over existing exports
+```
 
 ### Using
 
@@ -193,18 +219,46 @@ codex
 ``` 
 
 #### From an ongoing RE work
+
+```
+tocode firmwareX.bin.i64 -o firmwareX_decompiled/
 ```
 
-Interrupted exports save progress automatically. Rerun the same command to resume from cached function renders, or add `--restart` to ignore the saved checkpoint and start over.
-tocode firmwareX.bin.i64 -o firmwareX_decompiled/
-...
-```
+Interrupted exports save progress automatically. Rerun the same command to resume, or add `--restart` to start over.
 
 ### Binary Ninja
 
-The Binary Ninja backend exports the binary you already have **open** in Binary Ninja, emitting its Pseudo C. It does **not** need a Binary Ninja *headless* license: ToCode connects to the running GUI over a small RPC bridge.
+The Binary Ninja backend uses Binary Ninja's own analysis and Pseudo C. ToCode reaches Binary Ninja in one of three ways, tried in this order (`--binja-transport headless`, `mcp` or `rpyc` forces one):
 
-Since I don't have access to Binary Ninja headless, run this script once in Binary Ninja's Python console to open an RPC server ToCode can connect to:
+1. **Headless**: the Binary Ninja Python API runs inside ToCode. Needs a license that allows headless use.
+2. **MCP**: Binary Ninja 6's built-in MCP server exports what you have open in the UI. Any license.
+3. **RPC bridge**: a small server in Binary Ninja's Python console, for older versions. Any license.
+
+**Headless.** With a license that allows headless use, Binary Ninja works like the other backends: it takes a file, and `auto` picks it when IDA isn't available.
+
+```bash
+tocode ./program --backend binja -o out/
+tocode ./program.bndb -o out/            # a Binary Ninja database always goes to Binary Ninja
+tocode ./firmware/ --backend binja       # folders, APK native libraries, and .NET native code too
+```
+
+If ToCode can't find Binary Ninja, pass `--binja-dir` with its install folder.
+
+If your license doesn't allow headless use, ToCode uses a running Binary Ninja instead (below).
+
+**MCP (Binary Ninja 6 and newer).** Turn on the MCP server in Binary Ninja, then:
+
+```bash
+tocode --backend binja --list-binja              # open views, with an index
+tocode --backend binja -o out/                   # export the active view
+tocode --backend binja --binja-view 1 -o out/    # export one view by index
+tocode --backend binja --all-views -o out/       # every open view, one folder each
+tocode --backend binja ./program -o out/         # export that file (opened in Binary Ninja if it isn't)
+```
+
+With a headless license, a file argument is exported headless; add `--binja-transport mcp` to use the UI instead. ToCode connects to `http://127.0.0.1:24642/mcp`; `--binja-mcp-url` changes it.
+
+**RPC bridge (older versions).** If the MCP server doesn't answer, ToCode falls back to the bridge automatically. Run this once in Binary Ninja's Python console to start the bridge:
 
 ```python
 import threading, rpyc, binaryninja
@@ -229,16 +283,7 @@ print("ToCode RPC server listening on 127.0.0.1:18812")
 
 It exposes the whole Binary Ninja Python VM with no authentication, so keep it bound to `127.0.0.1`. The [binja-headless](https://github.com/hugsy/binja-headless) plugin exposes the same interface if you prefer a packaged option.
 
-Then drive it from ToCode:
-
-```bash
-tocode --backend binja --list-binja              # list open views with an index
-tocode --backend binja -o out/                   # export the focused view
-tocode --backend binja --binja-view 1 -o out/    # export a specific view by index
-tocode --backend binja --all-views -o out/       # export every open view, one folder each
-```
-
-Use `--binja-host` / `--binja-port` (or `TOCODE_BINJA_HOST` / `TOCODE_BINJA_PORT`; default `127.0.0.1:18812`) to reach Binary Ninja on another machine.
+The same commands work over the bridge. Use `--binja-host` / `--binja-port` to reach Binary Ninja on another machine.
 
 Already scripting inside Binary Ninja? Skip the server and export the live view directly:
 

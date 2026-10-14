@@ -17,6 +17,7 @@ from tocode import cli
 from tocode.analysis import create_analyzer
 from tocode.backends.base import choose_backend
 from tocode.backends.binja import (
+    strip_gutter,
     BinjaSession,
     describe_view,
     focused_view,
@@ -360,6 +361,13 @@ def test_disasm_and_summary() -> None:
     assert "args: 1" in summary
     assert "locals: 1" in summary
     assert "callees: 1" in summary
+
+
+def test_strip_gutter_drops_marker_glyphs_and_keeps_indentation() -> None:
+    body = "\u2753 int64_t sub_4006f0()\n{\n\u2753    /* jump -> nullptr */\n    return 0;\n}"
+    assert strip_gutter(body) == (
+        "int64_t sub_4006f0()\n{\n    /* jump -> nullptr */\n    return 0;\n}"
+    )
 
 
 def test_decompile_renders_pseudo_c() -> None:

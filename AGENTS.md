@@ -15,10 +15,12 @@ This repository contains ToCode, a Python-only binary exporter. ToCode takes one
 - `src/tocode/cli.py`: command-line entry point for `tocode`.
 - `src/tocode/__init__.py`: package version and `export_from_binaryview()`, the in-UI Binary Ninja library entry.
 - `src/tocode/analysis.py`: backend-neutral binary inventory and call graph normalization.
-- `src/tocode/backends/`: IDA Domain, radare2, angr, and Binary Ninja (`binja.py`) session adapters, plus the ASC/droidasc APK backend (`asc.py`: APK set discovery, DEX inventory, worker-side class decompilation).
+- `src/tocode/backends/`: IDA Domain, radare2, angr, and Binary Ninja (`binja_headless.py` over the in-process `binaryninja` API, `binja_mcp.py` over Binary Ninja's MCP server, `binja.py` over RPyc or an injected UI view) session adapters, plus the ASC/droidasc APK backend (`asc.py`: APK set discovery, DEX inventory, worker-side class decompilation).
 - `src/tocode/backends/dotnet.py` / `dotnet_pe.py`: .NET backend (input discovery for assemblies, apphosts, single-file bundles and NuGet packages; dnlib inventory; pure-Python PE/CLR/bundle parsing and IL token scan; worker-side C#/IL decompilation). `backends/dotnet_libs.py` downloads dnlib and ICSharpCode.Decompiler on demand (ask once, hash-pinned) into a per-user folder.
 - `src/tocode/dotnet.py`: .NET export pipeline; `dotnet_metadata.py`: .NET JSON documents and the generated `AGENTS.md`.
 - `src/tocode/apk.py`: APK export pipeline (extraction, decompile pool, resource decoding, metadata); `apk_metadata.py`: manifest parsing and Android JSON documents; `apk_native.py`: extraction and background native export of every `.so`.
+- `src/tocode/links/`: pure-Python link facts for folder exports (no backend involved): `sniff.py` file kinds; `binfmt_elf.py`, `binfmt_pe.py`, `binfmt_macho.py` (thin/fat, chained fixups, bind opcodes, export trie), `binfmt_dotnet.py` (dnlib-free metadata tables, signatures, P/Invoke); `inventory.py` folder scan; `resolve.py` loader rules per platform; `bind.py` symbol binding; `names.py` backend-name matching keys.
+- `src/tocode/folder.py`: folder export orchestration (plan, job keys and resume state in `.tocode-folder/`, one isolated process per binary via `NativeRunner`, the two-bar progress display); `folder_links.py`: joins link facts to the exports (`mappings.json`, per-file enrichment); `folder_annotate.py`: line-stable `tocode-link:` source comments; `folder_docs.py`: master `AGENTS.md`/JSON.
 - `src/tocode/exporter.py`: project writer, function rendering, worker-session rendering, generated export `AGENTS.md`.
 - `src/tocode/metadata.py`: JSON metadata and triage documents.
 - `src/tocode/cluster.py`: call-graph clustering.
@@ -57,6 +59,10 @@ When the IDA backend is used, the export also contains:
 
 - `<binary>.i64` or `<binary>.idb`
 
+When the headless Binary Ninja backend is used, the export also contains:
+
+- `<binary>.bndb`
+
 When `--tree` is passed, the export also contains:
 
 - `src/tree/**/*.c`
@@ -71,7 +77,7 @@ APK input (`.apk`, `.apks`, `.xapk`) uses the ASC backend and writes instead:
 - `data/apk/**` (all other entries verbatim), `data/res/**/*.xml`, `data/resources.json`
 - `tocode.log`, generated `AGENTS.md` and `CLAUDE.md`
 
-`base.apk` merges sibling `split_*.apk` files unless `--no-splits`; bundles are unpacked and merged. `--backend` selects the native backend for the `.so` exports (`binja` is rejected).
+`base.apk` merges sibling `split_*.apk` files unless `--no-splits`; bundles are unpacked and merged. `--backend` selects the native backend for the `.so` exports (`binja` needs the headless API).
 
 .NET input (a managed PE, an apphost launcher with its `.dll`, a single-file bundle, or a `.nupkg`; detected by content, `--as-native` opts out) uses the .NET backend and writes instead:
 
@@ -91,7 +97,10 @@ Framework/runtime assemblies and native runtime libraries inside bundles and pac
 - Keep generated text, environment variables, and user-visible strings branded as ToCode.
 - Keep status output concise but informative. Progress bars are handled by `tqdm` through `Progress.bar(...)`.
 - Use `apply_patch` for manual edits.
-- Do not commit generated export directories such as `here/`, `ls/`, or `*_decompiler/`.
+- Do not commit generated export directories such as `here/`, `ls/`, `*_decompiler/`, or `*_decompiled/`.
+- Folder links must come only from import/load tables and loader rules; never add name-similarity or string-based (`dlopen`/`LoadLibrary`) links. `links/names.py` keys only locate a backend's function for a symbol the tables already bound.
+- Source annotations must never add or remove lines (`folder_annotate` asserts it); line ranges in the JSON depend on it.
+- Folder runs print one overall bar and one current-binary bar; nested export logs go to `tocode.log` only. Keep per-file terminal output to failures.
 
 ## Dependencies
 
@@ -102,23 +111,61 @@ Framework/runtime assemblies and native runtime libraries inside bundles and pac
 - ASC (`droidasc`, PyPI) is the APK/DEX backend and a core runtime dependency. It pulls androguard. `backends/asc.py` is the only module that imports it; it pre-imports the modules ASC would otherwise stub in `sys.modules` and silences androguard's loguru logging. Class decompilation is not thread-safe, so it runs in spawned worker processes (recycled in rounds; do not use `max_tasks_per_child`, it deadlocks spawn pools on some CPython builds). The big per-method/per-class/per-string JSON documents are streamed row by row (`apk_metadata.write_json_rows`), never built as one object.
 - APK native libraries are exported by `apk_native.py` on a background thread, each `export_binary` in its own spawned process so a backend OOM-kill or crash only fails that library (`native-libs.json` status). The thread waits for `TOCODE_NATIVE_MIN_FREE_MB` (default 1024) of free memory before starting each library so it does not starve the DEX pool. `TOCODE_WORKER_TMP_DIR` also places the unpacked `.apks` bundle.
 - The .NET backend needs `pythonnet` (core dependency, pinned per Python version) and a .NET 9+ runtime on the host. Never commit or package DLLs: dnlib 4.5.0 and ICSharpCode.Decompiler 11.1 are downloaded from nuget.org by `backends/dotnet_libs.py` after the user agrees (asked once, remembered; `tocode --setup-dotnet` for non-interactive use). Their `.nupkg` and DLL SHA-256 hashes are pinned in `LIBRARIES` and checked at download time only (normal runs check presence; `--setup-dotnet` re-verifies). To bump a version, update both hashes. ICSharpCode.Decompiler 11 needs System.Reflection.Metadata 9, hence .NET 9+. Decompilation runs in spawned worker processes (recycled per round; a batch that crashes or hangs a worker is retried type by type so only the culprit fails). Tests must not require .NET: use `tests/dotnet_fixtures.py` (synthetic PE/bundles) and fake sessions; runtime-backed tests skip without it.
-- Binary Ninja is an opt-in backend (`--backend binja`, never auto-selected). The
-  `binaryninja` module is supplied by the Binary Ninja install (in-UI) or the
-  remote VM, so it is not a pip dependency. `rpyc`, the client used for the
-  headless path via [binja-headless](https://github.com/hugsy/binja-headless),
+- Binary Ninja comes after IDA in `auto` (IDA, the headless Binary Ninja API,
+  radare2, angr). The `binaryninja` module is supplied by the Binary Ninja
+  install (headless or in-UI) or the remote VM, so it is not a pip dependency.
+  `rpyc`, the client for [binja-headless](https://github.com/hugsy/binja-headless),
   is a core runtime dependency so the backend works out of the box.
 - Pin new dependencies exactly (`==`) and capture them in `uv.lock`.
 - Keep dependencies minimal and tied to exporting a project.
 
 ## Binary Ninja backend
 
-- Headless (no enterprise license): run binja-headless inside a running Binary
+Three transports (`--binja-transport auto|headless|mcp|rpyc`); `auto` tries them
+in this order: headless when a file is given and the API passes its license
+check, then MCP, then RPyc.
+
+- Headless (`backends/binja_headless.py`, a license that allows headless use):
+  `BinjaHeadlessSession` subclasses `BinjaSession` over a view this process
+  loaded, so it takes a file like IDA: folders, APK `.so` and .NET native code
+  work, and `.bndb` input always routes here (or to MCP/RPyc without the API).
+  `base.discover_binja_dir` finds the API (`--binja-dir`, `TOCODE_BINJA_DIR`,
+  `BN_INSTALL_DIR`, `install_api.py`'s `binaryninja.pth`, install paths);
+  `TOCODE_DISABLE_BINJA_HEADLESS=1` turns it off (tests set it).
+  `--binja-license` / `TOCODE_BINJA_LICENSE` names a license file that
+  `import_binaryninja` passes to `core_set_license` before the first core call
+  (the CLI exports the variable so workers and per-binary processes inherit it);
+  never log, print, or inspect license contents. The core
+  refuses a non-headless license on first use, not on import:
+  `headless_problem()` checks before choosing it, and `create_analyzer` retries
+  `auto` with binja skipped when opening fails. Analysis runs in `analyze()` and
+  is saved as `<sha256>.v<N>.bndb` in `TOCODE_BINJA_CACHE_DIR` (default
+  `~/.cache/tocode/binja`); bump `_BNDB_CACHE_VERSION` when the build changes.
+  An unreadable cache is rebuilt. Render workers (`worker_backend =
+  "binja-headless"`) each open that `.bndb`; the parent closes its view while
+  they run and `read_bytes` reopens it for `data/*.bin`. The database is
+  published into the export like the IDA `.i64`. `tests/fake_binja/` is a fake
+  API on disk so spawned workers can import it.
+- MCP (Binary Ninja 6+): `backends/mcp_client.py` is a standard-
+  library MCP client (streamable HTTP, JSON or SSE responses); `backends/
+  binja_mcp.py` maps the `bn_*` tools to the session interface. List tools return
+  paginated Markdown tables (front matter with `nextOffset`, `\|` escapes) and
+  decompile/disassembly return fenced text; keep parsing in `mcp_client.py`. The
+  server has one global active view: the session activates its view, re-checks it
+  every `ACTIVE_CHECK_EVERY` calls, and restores the user's view on close. Files
+  opened via `bn_open_item_open` stay open (the UI refuses to discard analysis
+  without its prompt). Section bytes come from `read_bytes` (`bn_memory_read`),
+  since the input may be a `.bndb`. `--binja-transport auto|mcp|rpyc`,
+  `--binja-mcp-url` / `TOCODE_BINJA_MCP_URL` (default `http://127.0.0.1:24642/mcp`).
+  Never call mutating `bn_*` tools from the exporter.
+- RPyc (any license): run binja-headless inside a running Binary
   Ninja, then `tocode --backend binja --binja-host <ip>`. It exports an already
   **loaded** view (the binary positional is optional). Configure the connection
   with `--binja-host`/`--binja-port` or `TOCODE_BINJA_HOST` / `TOCODE_BINJA_PORT`
   (defaults `127.0.0.1:18812`).
-- Choosing the view (headless): default is the focused view (the one binja-headless
-  exposes as `conn.root.bv`). `--list-binja` prints every open view with an index;
+- Choosing the view (MCP/RPyc): MCP defaults to the active view, RPyc to the
+  focused view (the one binja-headless exposes as `conn.root.bv`).
+  `--list-binja` prints every open view with an index;
   `--binja-view N` exports that index; `--all-views` exports every open view, each
   into its own folder under `-o` (or the cwd). Active-context lookup is Qt-main-
   thread bound and unavailable over RPyc, so the focused view comes from
@@ -128,10 +175,11 @@ Framework/runtime assemblies and native runtime libraries inside bundles and pac
 - In the Binary Ninja UI: call `tocode.export_from_binaryview(bv, out_dir)` from
   the scripting console (`bv` is the live view; `binaryninja` is imported
   locally). It runs the same export pipeline as the CLI.
-- The backend renders serially against the live view (`parallel_safe = False` and
-  excluded from `exporter.TIMEOUT_WORKER_BACKENDS`): a `BinaryView` / RPyc
-  connection cannot be pickled into a worker process. Do not add it to the
-  spawned-worker path.
+- UI, MCP, and RPyc render serially against the live view (`parallel_safe =
+  False`, and `binja` is excluded from `exporter.TIMEOUT_WORKER_BACKENDS`): a
+  live `BinaryView` / RPyc connection cannot be pickled into a worker process.
+  Do not add them to the spawned-worker path; only `binja-headless` workers,
+  which reopen the `.bndb`, belong there.
 
 ## Verification
 

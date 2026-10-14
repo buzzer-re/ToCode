@@ -79,6 +79,12 @@ class DotnetExportOptions:
     native: bool = True
     include_framework: bool = False
     native_options: NativeOptions = field(default_factory=NativeOptions)
+    # Copy and decompile the native libraries next to the assembly that its
+    # P/Invoke declarations name. Folder exports turn this off: they export
+    # those libraries themselves and link them.
+    pinvoke_neighbours: bool = True
+    # Provenance paragraph for AGENTS.md (set by folder exports).
+    origin: str | None = None
 
 
 @dataclass
@@ -278,7 +284,7 @@ def _collect_natives(context: DotnetContext) -> None:
     session = _need(context.session)
     root = _need(context.root)
     natives = list(found.natives)
-    if found.kind in {"assembly", "apphost"}:
+    if found.kind in {"assembly", "apphost"} and context.options.pinvoke_neighbours:
         known = {native.path.resolve() for native in natives}
         for module, path in pinvoke_neighbours(
             found.input.parent, session.pinvoke_modules
@@ -1045,6 +1051,7 @@ def _write_final_documents(context: DotnetContext) -> None:
             native_count=sum(
                 1 for lib in context.libs if not lib.status.startswith("skipped")
             ),
+            origin=context.options.origin,
         )
         + "\n",
     )
