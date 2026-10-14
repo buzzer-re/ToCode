@@ -4,7 +4,14 @@ from pathlib import Path
 import time
 from typing import Any
 
-from .backends.base import BackendRequest, DecompilerSession, choose_backend
+from .backends.base import (
+    BackendRequest,
+    DecompilerSession,
+    choose_backend,
+    is_binja_database,
+    probe_binja_headless,
+)
+from .errors import BackendError
 from .backends.ida import IdaSession
 from .backends.r2 import R2Session
 from .cluster import describe_imports
@@ -472,19 +479,49 @@ def create_analyzer(
     binja_port: int = 18812,
     binja_bv: Any = None,
     binja_bn: Any = None,
+    session: DecompilerSession | None = None,
+    binja_dir: Path | None = None,
 ) -> BinaryAnalyzer:
-    choice = choose_backend(
-        backend,
-        input_path=binary,
-        idadir=idadir,
-        ida_domain_path=ida_domain_path,
-    )
-    if progress is not None:
-        progress.log(f"Using {choice.selected.upper()} as backend.")
-        # Log before constructing the session: opening (and, for a fresh binary,
-        # loading) the IDA database happens inside the session constructor and can
-        # take a while, so the user should see activity instead of a silent gap.
-        progress.log(f"Loading {Path(binary).resolve()}")
+    skip: frozenset[str] = frozenset()
+    while True:
+        choice = choose_backend(
+            backend,
+            input_path=binary,
+            idadir=idadir,
+            ida_domain_path=ida_domain_path,
+            binja_dir=binja_dir,
+            skip=skip,
+        )
+        if progress is not None:
+            progress.log(f"Using {choice.selected.upper()} as backend.")
+            # Log before constructing the session: opening (and, for a fresh
+            # binary, loading) a database happens inside the session constructor
+            # and can take a while, so the user sees activity instead of a gap.
+            progress.log(f"Loading {Path(binary).resolve()}")
+        if choice.selected != "binja" or session is not None or binja_bv is not None:
+            break
+        if backend == "binja" and not probe_binja_headless(binja_dir):
+            break  # explicit binja without the local API: binja-headless (RPyc)
+        from .backends.binja_headless import BinjaHeadlessSession
+
+        try:
+            headless = BinjaHeadlessSession(
+                binary,
+                binja_dir=binja_dir,
+                purge_cache=purge_cache,
+                progress=progress,
+            )
+        except BackendError as exc:
+            if choice.requested != "auto" or is_binja_database(Path(binary)):
+                raise
+            if progress is not None:
+                progress.log(
+                    f"Binary Ninja headless unavailable ({exc}); trying the next backend"
+                )
+            skip = skip | {"binja"}
+            continue
+        return BinaryAnalyzer(binary, session=headless, progress=progress)
+
     if choice.selected == "ida":
         return BinaryAnalyzer(
             binary,
@@ -506,17 +543,22 @@ def create_analyzer(
             session=AngrSession(binary),
             progress=progress,
         )
+    if choice.selected == "binja" and session is not None:
+        # A session built by the caller (Binary Ninja over MCP).
+        return BinaryAnalyzer(binary, session=session, progress=progress)
     if choice.selected == "binja":
         # Imported lazily so non-binja exports never need the binaryninja/rpyc
         # stack. With an injected view (in the Binary Ninja UI) the session wraps
-        # it directly; otherwise connect headless via binja-headless (RPyc).
+        # it directly; otherwise connect to binja-headless over RPyc.
         from .backends.binja import BinjaSession
 
         if binja_bv is not None:
-            session: DecompilerSession = BinjaSession(bv=binja_bv, bn=binja_bn)
+            binja_session: DecompilerSession = BinjaSession(bv=binja_bv, bn=binja_bn)
         else:
-            session = BinjaSession.connect_headless(binja_host, binja_port, path=binary)
-        return BinaryAnalyzer(binary, session=session, progress=progress)
+            binja_session = BinjaSession.connect_headless(
+                binja_host, binja_port, path=binary
+            )
+        return BinaryAnalyzer(binary, session=binja_session, progress=progress)
     return BinaryAnalyzer(
         binary,
         session=R2Session(binary, analysis_command=analysis_command),

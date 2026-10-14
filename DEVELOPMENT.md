@@ -29,7 +29,7 @@ area you are changing:
 | IDA | IDA Pro 9 with idalib | `ida-domain`/`idapro` come with ToCode; IDA is found via `IDADIR`, `--idadir`, or common install paths. |
 | radare2 | `r2` plus r2ghidra (`r2pm -ci r2ghidra r2ghidra-sleigh`) | Used by `--backend r2` and as the `auto` fallback. |
 | angr | `uv sync --extra angr` | Large; tests in `tests/test_angr_backend.py` skip without it. |
-| Binary Ninja | Binary Ninja with binja-headless | See the Binary Ninja section of the README. |
+| Binary Ninja | A license that allows headless use (the API is found via `--binja-dir`, `TOCODE_BINJA_DIR`, or `install_api.py`'s `.pth`), or Binary Ninja 6+ with its MCP server on (binja-headless for older versions) | See the Binary Ninja section of the README. `tests/test_binja_headless.py` runs against a fake API in `tests/fake_binja/`, `tests/test_binja_mcp.py` against a fake MCP server. |
 | Android | nothing extra (`droidasc` is a core dependency) | Real APK test: set `TOCODE_TEST_APK=/path/to/app.apk`. |
 | .NET | a .NET 9+ runtime, then `uv run tocode --setup-dotnet` | The SDK (`dotnet-sdk-10.0`) lets you build test assemblies. Real test: `TOCODE_TEST_DOTNET=/path/to/App.dll`. |
 

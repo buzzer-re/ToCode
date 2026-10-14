@@ -18,6 +18,12 @@ DEFAULT_IDA_WORKER_MEMORY_MB = 3072
 # is computed from the host's real available memory and the real database size.
 DEFAULT_IDA_WORKER_BASE_MEMORY_MB = 768
 DEFAULT_IDA_DB_RESIDENT_FACTOR = 1.5
+# A headless Binary Ninja worker loads the core, its plugins, and the .bndb
+# (about 650 MB for a tiny binary on Binary Ninja 6).
+DEFAULT_BINJA_WORKER_MEMORY_MB = 1024
+DEFAULT_BINJA_WORKER_BASE_MEMORY_MB = 768
+DEFAULT_BINJA_DB_RESIDENT_FACTOR = 2.0
+MAX_AUTO_BINJA_JOBS = 4
 
 
 def choose_jobs(
@@ -31,12 +37,18 @@ def choose_jobs(
     available_memory_mb: int | None = None,
     ida_worker_memory_mb: int | None = None,
     database_size_mb: int | None = None,
+    measured_worker_memory_mb: int | None = None,
 ) -> int:
     limit = job_limit if job_limit is not None else configured_job_limit()
     is_ida = backend.lower() == "ida"
+    is_binja = backend.lower() == "binja-headless"
     memory_ceiling = (
         _ida_memory_ceiling(available_memory_mb, ida_worker_memory_mb, database_size_mb)
         if is_ida
+        else _binja_memory_ceiling(
+            available_memory_mb, database_size_mb, measured_worker_memory_mb
+        )
+        if is_binja
         else None
     )
 
@@ -51,11 +63,17 @@ def choose_jobs(
 
     if function_count < MIN_FUNCTIONS_FOR_AUTO or analysis_seconds is None:
         return 1
-    if not is_ida and analysis_seconds > FAST_ANALYSIS_SECONDS:
+    if not (is_ida or is_binja) and analysis_seconds > FAST_ANALYSIS_SECONDS:
         return 1
 
     cpus = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
-    backend_limit = MAX_AUTO_IDA_JOBS if is_ida else MAX_AUTO_JOBS
+    backend_limit = (
+        MAX_AUTO_IDA_JOBS
+        if is_ida
+        else MAX_AUTO_BINJA_JOBS
+        if is_binja
+        else MAX_AUTO_JOBS
+    )
     ceiling = min(cpus, backend_limit, limit, function_count)
     if memory_ceiling is not None:
         ceiling = min(ceiling, memory_ceiling)
@@ -83,6 +101,36 @@ def _ida_memory_ceiling(
     return max(1, available_memory_mb // worker_memory_mb)
 
 
+def _binja_memory_ceiling(
+    available_memory_mb: int | None,
+    database_size_mb: int | None,
+    measured_worker_memory_mb: int | None = None,
+) -> int | None:
+    if available_memory_mb is None:
+        return None
+    worker_memory_mb = _env_int(
+        "TOCODE_BINJA_WORKER_MEMORY_MB", DEFAULT_BINJA_WORKER_MEMORY_MB, 256
+    )
+    if database_size_mb is not None and database_size_mb > 0:
+        estimated = DEFAULT_BINJA_WORKER_BASE_MEMORY_MB + int(
+            database_size_mb * DEFAULT_BINJA_DB_RESIDENT_FACTOR
+        )
+        worker_memory_mb = max(worker_memory_mb, estimated)
+    # A worker reopening the database holds about what the analyzing process
+    # peaked at (a 38k-function binary: ~1.8 GB, far above the size estimate).
+    if measured_worker_memory_mb is not None and measured_worker_memory_mb > 0:
+        worker_memory_mb = max(worker_memory_mb, measured_worker_memory_mb)
+    return max(1, available_memory_mb // worker_memory_mb)
+
+
+def _env_int(name: str, default: int, minimum: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    try:
+        return max(minimum, int(raw)) if raw else default
+    except ValueError:
+        return default
+
+
 def describe_jobs(
     *,
     function_count: int,
@@ -103,6 +151,8 @@ def describe_jobs(
         return f"Workers: 1 after {analysis_seconds:.2f}s analysis"
     if backend.lower() == "ida":
         return f"Workers: {selected}, IDA cache ready"
+    if backend.lower() == "binja-headless":
+        return f"Workers: {selected}, Binary Ninja database ready"
     return f"Workers: {selected} after {analysis_seconds:.2f}s analysis"
 
 

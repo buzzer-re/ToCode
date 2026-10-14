@@ -106,6 +106,7 @@ class NativeOptions:
     tree: bool = False
     entropy: bool = False
     restart: bool = False
+    binja_dir: Path | None = None
 
 
 def _rel(path: Path | None, root: Path) -> str | None:
@@ -188,6 +189,7 @@ def run_native_export(
         idadir=options.idadir,
         ida_domain_path=options.ida_domain_path,
         purge_cache=options.purge_cache,
+        binja_dir=options.binja_dir,
     ) as analyzer:
         summary = export_binary(
             analyzer,

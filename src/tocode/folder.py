@@ -672,6 +672,7 @@ def _run_jobs(
         tree=native.tree,
         entropy=native.entropy,
         restart=options.restart,
+        binja_dir=native.binja_dir,
     )
 
     def settings_for(lib: NativeLib) -> JobSettings:

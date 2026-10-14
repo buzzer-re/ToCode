@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any
 
 from .base import BackendName
@@ -22,6 +23,26 @@ _RUNTIME_NAMES = frozenset(
         "__do_global_dtors_aux",
     }
 )
+
+
+_GUTTER_RX = re.compile(r"^[^\x00-\x7f]*\s*")
+_GUTTER_GLYPH_RX = re.compile(r"^[^\x00-\x7f]+")
+
+
+def strip_gutter(body: str) -> str:
+    """Drop Binary Ninja's UI gutter: the indent or marker glyph before the
+    header line, and marker glyphs (such as an unresolved jump's) before body
+    lines, which keep their indentation."""
+    lines = body.split("\n")
+    header_seen = False
+    for index, line in enumerate(lines):
+        if not header_seen:
+            if line.strip():
+                lines[index] = _GUTTER_RX.sub("", line, count=1)
+                header_seen = True
+            continue
+        lines[index] = _GUTTER_GLYPH_RX.sub("", line, count=1)
+    return "\n".join(lines)
 
 
 # -- headless (binja-headless / RPyc) helpers ------------------------------
@@ -548,6 +569,15 @@ class BinjaSession:
                     imported.add(name)
         return sorted(edges), sorted(imported)
 
+    def read_bytes(self, address: int, size: int) -> bytes | None:
+        """Section bytes from the view (the input may be a .bndb, and sections
+        are addressed by virtual address here, not by file offset)."""
+        try:
+            data = self._bv.read(int(address), int(size))
+        except Exception:  # noqa: BLE001
+            return None
+        return bytes(data) if data else None
+
     def data_xrefs(self, addresses) -> dict[int, list[tuple[int, bool]]]:
         # Data cross-references ship as an empty stub for v1.
         return {}
@@ -752,7 +782,7 @@ class BinjaSession:
             proto = self._signature(func) or f"int sub_{address:x}()"
             return f"{proto}\n{{\n    /* Binary Ninja render failed: {exc} */\n}}\n"
 
-        text = "\n".join(body).strip("\n")
+        text = strip_gutter("\n".join(body)).strip("\n")
         if not text:
             proto = self._signature(func) or f"int sub_{address:x}()"
             return f"{proto}\n{{\n}}\n"

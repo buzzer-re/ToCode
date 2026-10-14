@@ -10,6 +10,7 @@ from .analysis import create_analyzer
 from .apk import ApkExportOptions, export_apk
 from .apk_native import NativeOptions
 from .backends.asc import is_apk_input
+from .backends.base import is_binja_database, probe_binja_headless
 from .backends.dotnet import is_dotnet_input
 from .errors import ToCodeError
 from .exporter import export_binary
@@ -50,6 +51,11 @@ def build_parser() -> argparse.ArgumentParser:
         os.environ.get("TOCODE_BINJA_HOST", "127.0.0.1").strip() or "127.0.0.1"
     )
     default_binja_port = _env_port("TOCODE_BINJA_PORT", 18812)
+    default_binja_transport = (
+        os.environ.get("TOCODE_BINJA_TRANSPORT", "auto").strip().lower() or "auto"
+    )
+    if default_binja_transport not in {"auto", "headless", "mcp", "rpyc"}:
+        default_binja_transport = "auto"
     parser = argparse.ArgumentParser(
         prog="tocode",
         description="Export a compiled binary into a source-like reverse-engineering project.",
@@ -59,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         nargs="?",
         default=None,
-        help="Input binary to export. Optional for --backend binja, which exports an open Binary Ninja view.",
+        help="Input binary or folder to export. Optional for --backend binja, which exports an open Binary Ninja view (a path given there is opened in Binary Ninja, or matched to an open file).",
     )
     parser.add_argument(
         "-o",
@@ -72,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--backend",
         choices=("auto", "ida", "r2", "angr", "binja"),
         default=default_backend,
-        help="Decompiler backend: auto prefers IDA, then r2, then angr as a last-resort fallback; binja drives Binary Ninja and is opt-in (default: TOCODE_BACKEND or auto). For APK input this selects the backend for the native .so libraries (binja is not supported there).",
+        help="Decompiler backend: auto prefers IDA, then Binary Ninja's Python API (headless), then r2, then angr as a last-resort fallback; binja always uses Binary Ninja, also through a running Binary Ninja (see --binja-transport) (default: TOCODE_BACKEND or auto). For APK input this selects the backend for the native .so libraries (binja needs the headless API there).",
     )
     parser.add_argument(
         "--no-native",
@@ -134,6 +140,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="APK input: export base.apk alone instead of merging sibling split_*.apk files.",
     )
     parser.add_argument(
+        "--binja-transport",
+        choices=("auto", "headless", "mcp", "rpyc"),
+        default=default_binja_transport,
+        help="How the binja backend reaches Binary Ninja: headless loads the input file with the Binary Ninja Python API in this process (needs a license that allows headless use), mcp uses Binary Ninja 6's built-in MCP server, rpyc uses binja-headless. auto uses headless when an input file is given and the API is installed, then MCP, then RPyc (default: TOCODE_BINJA_TRANSPORT or auto).",
+    )
+    parser.add_argument(
+        "--binja-dir",
+        type=Path,
+        default=None,
+        help="Binary Ninja install folder (or its python/ folder) for the headless API (default: TOCODE_BINJA_DIR, BN_INSTALL_DIR, the binaryninja.pth written by Binary Ninja's install_api.py, or common install paths).",
+    )
+    parser.add_argument(
+        "--binja-license",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Binary Ninja license file for the headless API, handed to the core instead of the license.dat in Binary Ninja's user folder; its contents are never logged (default: TOCODE_BINJA_LICENSE).",
+    )
+    parser.add_argument(
+        "--binja-mcp-url",
+        default=None,
+        metavar="URL",
+        help="URL of Binary Ninja's MCP server (default: TOCODE_BINJA_MCP_URL or http://127.0.0.1:24642/mcp).",
+    )
+    parser.add_argument(
         "--binja-host",
         default=default_binja_host,
         help="Host of the binja-headless RPyc service for the binja backend (default: TOCODE_BINJA_HOST or 127.0.0.1).",
@@ -147,14 +178,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--list-binja",
         action="store_true",
-        help="List the BinaryViews open in Binary Ninja with their index, then exit (binja backend).",
+        help="List the binary views open in Binary Ninja with their index, then exit (binja backend).",
     )
     parser.add_argument(
         "--binja-view",
         type=int,
         default=None,
         metavar="N",
-        help="Export the open Binary Ninja view with this index (from --list-binja). Default: the focused view.",
+        help="Export the open Binary Ninja view with this index (from --list-binja). Default: the active view (MCP) or the focused view (RPyc).",
     )
     parser.add_argument(
         "--all-views",
@@ -233,27 +264,74 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.binja_view is not None and args.all_views:
         parser.error("--binja-view and --all-views cannot be combined")
+    if args.binja_license is not None:
+        license_file = args.binja_license.expanduser().resolve()
+        if not license_file.is_file():
+            parser.error(f"--binja-license: {license_file} is not a file")
+        # Through the environment so render workers and the per-binary
+        # processes of folder and APK exports pick it up too.
+        os.environ["TOCODE_BINJA_LICENSE"] = str(license_file)
+    if (
+        args.backend == "auto"
+        and args.binary is not None
+        and is_binja_database(args.binary)
+    ):
+        # Only Binary Ninja reads a .bndb: headless when the API is installed,
+        # otherwise through a running Binary Ninja.
+        args.backend = "binja"
     if args.backend == "binja":
-        if args.binary is not None and args.binary.is_dir():
+        headless = (
+            args.binja_transport in ("auto", "headless")
+            and not binja_only
+            and args.binary is not None
+            and probe_binja_headless(args.binja_dir)
+        )
+        if args.binja_transport == "headless" and not headless:
             parser.error(
-                "--backend binja is not supported for folder input; use ida, r2, or angr"
+                "--binja-transport headless needs the Binary Ninja Python API and an "
+                "input file; pass --binja-dir (or set TOCODE_BINJA_DIR) to the "
+                "Binary Ninja install"
             )
-        if args.binary is not None and is_apk_input(args.binary):
-            parser.error(
-                "--backend binja is not supported for APK input; native libraries "
-                "use ida, r2, or angr"
-            )
-        if (
-            args.binary is not None
-            and not args.as_native
-            and args.binary.is_file()
-            and is_dotnet_input(args.binary)
-        ):
-            parser.error(
-                "--backend binja is not supported for .NET input; native code "
-                "uses ida, r2, or angr (or pass --as-native)"
-            )
-        return _run_binja(args, progress, parser, argv)
+        if headless:
+            from .backends.binja_headless import headless_problem
+
+            # A personal license ships the API but refuses headless use; auto
+            # then exports through a running Binary Ninja instead.
+            problem = headless_problem(args.binja_dir)
+            if problem is not None:
+                if args.binja_transport == "headless":
+                    print(f"tocode: {problem}", file=sys.stderr)
+                    return 1
+                progress.log(
+                    f"Binary Ninja headless unavailable ({problem}); "
+                    "using a running Binary Ninja"
+                )
+                headless = False
+        if not headless:
+            # A live Binary Ninja view (MCP or RPyc) exports one binary at a time.
+            if args.binary is not None and args.binary.is_dir():
+                parser.error(
+                    "--backend binja needs the Binary Ninja Python API (headless) "
+                    "for folder input; use ida, r2, or angr otherwise"
+                )
+            if args.binary is not None and is_apk_input(args.binary):
+                parser.error(
+                    "--backend binja needs the Binary Ninja Python API (headless) "
+                    "for APK input; native libraries use ida, r2, or angr otherwise"
+                )
+            if (
+                args.binary is not None
+                and not args.as_native
+                and args.binary.is_file()
+                and is_dotnet_input(args.binary)
+            ):
+                parser.error(
+                    "--backend binja needs the Binary Ninja Python API (headless) "
+                    "for .NET input; native code uses ida, r2, or angr (or pass "
+                    "--as-native)"
+                )
+            return _run_binja(args, progress, parser, argv)
+        # Headless: the regular file pipeline below, with Binary Ninja in-process.
 
     if args.binary is None:
         parser.error("the following arguments are required: binary")
@@ -348,6 +426,7 @@ def _native_options(args: argparse.Namespace) -> NativeOptions:
         jobs=args.jobs,
         tree=args.tree,
         entropy=args.entropy,
+        binja_dir=args.binja_dir,
     )
 
 
@@ -494,6 +573,7 @@ def _run_one(
         purge_cache=args.purge_cache,
         binja_host=args.binja_host,
         binja_port=args.binja_port,
+        binja_dir=args.binja_dir,
     ) as analyzer:
         return export_binary(
             analyzer,
@@ -512,6 +592,22 @@ def _run_binja(
     parser: argparse.ArgumentParser,
     argv: list[str] | None,
 ) -> int:
+    if args.binja_transport in ("auto", "mcp"):
+        from .backends import binja_mcp
+
+        url = args.binja_mcp_url or binja_mcp.mcp_url()
+        try:
+            client = binja_mcp.connect(url)
+        except ToCodeError as exc:
+            if args.binja_transport == "mcp":
+                print(f"tocode: {exc}", file=sys.stderr)
+                return 1
+            progress.log(
+                f"Binary Ninja MCP not reachable at {url} ({exc}); "
+                f"trying binja-headless at {args.binja_host}:{args.binja_port}"
+            )
+        else:
+            return _run_binja_mcp(client, args, progress, argv)
     # Drive a running Binary Ninja over binja-headless. One connection is shared
     # across every exported view; injected views never own it (their session
     # close() leaves it alone), so the CLI closes it once at the end.
@@ -576,6 +672,105 @@ def _run_binja(
         print(
             f"Exported {len(targets)} view(s) in "
             f"{_format_duration(time.monotonic() - started)}"
+        )
+    return 0
+
+
+def _run_binja_mcp(
+    client, args: argparse.Namespace, progress: Progress, argv: list[str] | None
+) -> int:
+    """Export through Binary Ninja's built-in MCP server (Binary Ninja 6+)."""
+    from .backends import binja_mcp
+
+    out_dir = args.out_dir.expanduser().resolve() if args.out_dir is not None else None
+    started = time.monotonic()
+    try:
+        views = binja_mcp.list_views(client)
+        if args.list_binja:
+            if not views:
+                print("No binary views are open in Binary Ninja.")
+            else:
+                print(f"Open binary views ({len(views)}, via MCP at {client.url}):")
+                for index, view in enumerate(views):
+                    print(f"  [{index}] {view.describe()}")
+            return 0
+        targets: list = []
+        if args.all_views:
+            targets = list(views)
+        elif args.binja_view is not None:
+            if not 0 <= args.binja_view < len(views):
+                upper = len(views) - 1
+                raise ToCodeError(
+                    f"--binja-view {args.binja_view} is out of range (open views: "
+                    f"0..{upper if upper >= 0 else 'none'}); run --list-binja"
+                )
+            targets = [views[args.binja_view]]
+        elif args.binary is not None:
+            path = args.binary.expanduser().resolve()
+            found = binja_mcp.find_view_for_path(views, path)
+            if found is None:
+                progress.log(f"Opening {path} in Binary Ninja (it stays open there)")
+                found = binja_mcp.open_path(client, path)
+            targets = [found]
+        else:
+            active = next((view for view in views if view.active), None)
+            if active is None:
+                raise ToCodeError(
+                    "Binary Ninja has no active binary view for MCP; run --list-binja "
+                    "and pass --binja-view N, --all-views, or a binary path"
+                )
+            targets = [active]
+        if not targets:
+            print("tocode: no Binary Ninja views to export", file=sys.stderr)
+            return 1
+        multi = args.all_views or len(targets) > 1
+        for view in targets:
+            source = Path(view.path or "binaryview")
+            if multi:
+                parent = out_dir if out_dir is not None else Path.cwd()
+                view_out: Path | None = parent / default_output_name(source)
+            else:
+                view_out = out_dir
+            log_root = (
+                view_out
+                if view_out is not None
+                else source.parent / default_output_name(source)
+            )
+            progress.set_log_path(log_root / "tocode.log")
+            progress.log(
+                f"Command: {' '.join(sys.argv if argv is None else ['tocode', *argv])}"
+            )
+            progress.log(f"Exporting Binary Ninja view {view.describe()} over MCP")
+            session = binja_mcp.BinjaMcpSession(client, view)
+            with create_analyzer(
+                source, backend="binja", progress=progress, session=session
+            ) as analyzer:
+                summary = export_binary(
+                    analyzer,
+                    out_dir=view_out,
+                    progress=progress,
+                    jobs=args.jobs,
+                    tree=args.tree,
+                    entropy=args.entropy,
+                    restart=args.restart,
+                )
+            if not args.quiet:
+                print(f"Project: {summary.root_dir}")
+                print(
+                    f"Summary: functions={summary.function_count} "
+                    f"clusters={summary.cluster_count} failures={len(summary.failed_functions)}"
+                )
+    except KeyboardInterrupt:
+        progress.log("tocode: interrupted; progress saved if checkpointing had started")
+        print("tocode: interrupted; rerun the same command to resume", file=sys.stderr)
+        return 130
+    except ToCodeError as exc:
+        progress.log(f"tocode: {exc}")
+        print(f"tocode: {exc}", file=sys.stderr)
+        return 1
+    if not args.quiet:
+        print(
+            f"Exported {len(targets)} view(s) in {_format_duration(time.monotonic() - started)}"
         )
     return 0
 
