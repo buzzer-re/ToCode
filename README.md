@@ -130,7 +130,7 @@ tocode Vendor.Lib.1.0.0.nupkg
 - `src/raw/<package>/<Class>.java`: one decompiled Java file per class, folders follow Java packages (no clustering, no summaries).
 - `AndroidManifest.xml` + `manifest.json`: decoded and parsed manifest (permissions, components with intent filters and exported state, application attributes, split manifests).
 - `classes.json`, `functions.json`, `function-index.json`, `strings.json`, `imports.json`, `exports.json` (exported components + JNI methods), `reachable.json` (from manifest components), `package-graph.json`, `sections.json`, `triage.json`.
-- `lib/<abi>/*.so`: every native library extracted; `native/<abi>/<lib>/`: a complete nested ToCode export per library (all ABIs), produced on a background thread while the DEX side decompiles. `native-libs.json` records the status of each (each library runs in its own process; one failing or being OOM-killed never fails the APK export, and the native thread waits for `TOCODE_NATIVE_MIN_FREE_MB`, default 1024 MB, of free memory before each library). Pass `--no-native` to skip the native decompilation (libraries are still extracted). `--backend` picks the native backend (`auto`/`ida`/`binja`/`r2`/`angr`; `binja` needs the headless API here).
+- `lib/<abi>/*.so`: every native library; `native/<abi>/<lib>/`: a full ToCode export of each one, made while the DEX side decompiles. `native-libs.json` records the status of each; a library that fails never fails the APK export. `--no-native` skips them, and `--backend` picks their backend.
 - `data/apk/**`: every other APK entry verbatim; `data/res/**/*.xml` and `data/resources.json`: decoded binary XML and `resources.arsc`.
 
 `base.apk` automatically merges sibling `split_*.apk` files (config and ABI splits) into the same project; `--no-splits` exports it alone. The default output directory is `<manifest package>_decompiler`.
@@ -219,12 +219,12 @@ codex
 ``` 
 
 #### From an ongoing RE work
+
+```
+tocode firmwareX.bin.i64 -o firmwareX_decompiled/
 ```
 
-Interrupted exports save progress automatically. Rerun the same command to resume from cached function renders, or add `--restart` to ignore the saved checkpoint and start over.
-tocode firmwareX.bin.i64 -o firmwareX_decompiled/
-...
-```
+Interrupted exports save progress automatically. Rerun the same command to resume, or add `--restart` to start over.
 
 ### Binary Ninja
 
@@ -242,9 +242,9 @@ tocode ./program.bndb -o out/            # a Binary Ninja database always goes t
 tocode ./firmware/ --backend binja       # folders, APK native libraries, and .NET native code too
 ```
 
-ToCode finds the API through `--binja-dir` or `TOCODE_BINJA_DIR` (the install folder or its `python/` folder), `BN_INSTALL_DIR`, the `binaryninja.pth` written by Binary Ninja's `scripts/install_api.py`, or the default install locations. The finished analysis is cached as a `.bndb` (in `~/.cache/tocode/binja`, or `TOCODE_BINJA_CACHE_DIR`), so a re-run and every render worker open it instead of analyzing again; `--purge-cache` rebuilds it. The export includes it as `<binary>.bndb`, like IDA's `.i64`. Each worker loads Binary Ninja and the database, so free memory caps the worker count (`TOCODE_BINJA_WORKER_MEMORY_MB`, default 1024 per worker).
+If ToCode can't find Binary Ninja, pass `--binja-dir` with its install folder.
 
-If the license refuses headless use, ToCode moves on: `--backend binja` to a running Binary Ninja, `auto` to radare2 or angr. `TOCODE_DISABLE_BINJA_HEADLESS=1` skips the API altogether.
+If your license doesn't allow headless use, ToCode uses a running Binary Ninja instead (below).
 
 **MCP (Binary Ninja 6 and newer).** Turn on the MCP server in Binary Ninja, then:
 
@@ -256,9 +256,7 @@ tocode --backend binja --all-views -o out/       # every open view, one folder e
 tocode --backend binja ./program -o out/         # export that file (opened in Binary Ninja if it isn't)
 ```
 
-With a headless license, a file argument is exported headless; add `--binja-transport mcp` to export it through the UI instead.
-
-ToCode connects to `http://127.0.0.1:24642/mcp` by default; set `--binja-mcp-url` or `TOCODE_BINJA_MCP_URL` to change it. MCP has one active view shared with the UI. ToCode switches it to the view it exports and switches it back when done. A file ToCode opens for you stays open in Binary Ninja, because Binary Ninja only closes analyzed files through its save prompt. Section data (`data/*.bin`) is read from Binary Ninja's view, so exporting a `.bndb` works.
+With a headless license, a file argument is exported headless; add `--binja-transport mcp` to use the UI instead. ToCode connects to `http://127.0.0.1:24642/mcp`; `--binja-mcp-url` changes it.
 
 **RPC bridge (older versions).** If the MCP server doesn't answer, ToCode falls back to the bridge automatically. Run this once in Binary Ninja's Python console to start the bridge:
 
@@ -285,7 +283,7 @@ print("ToCode RPC server listening on 127.0.0.1:18812")
 
 It exposes the whole Binary Ninja Python VM with no authentication, so keep it bound to `127.0.0.1`. The [binja-headless](https://github.com/hugsy/binja-headless) plugin exposes the same interface if you prefer a packaged option.
 
-The same commands work over the bridge (the default view is the focused one). Use `--binja-host` / `--binja-port` (or `TOCODE_BINJA_HOST` / `TOCODE_BINJA_PORT`; default `127.0.0.1:18812`) to reach Binary Ninja on another machine.
+The same commands work over the bridge. Use `--binja-host` / `--binja-port` to reach Binary Ninja on another machine.
 
 Already scripting inside Binary Ninja? Skip the server and export the live view directly:
 
