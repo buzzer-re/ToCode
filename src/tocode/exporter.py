@@ -143,16 +143,16 @@ class CheckpointStore:
         self._function_count = len(self.addresses)
         self._completed_indices.clear()
 
-        if self.restart and self.state_dir.exists():
-            shutil.rmtree(self.state_dir)
+        if self.restart and self.state_path.exists():
+            self._clear()
             self.progress.log("Checkpoint: discarded previous state (--restart)")
 
         existing = self._read_raw_state()
-        if existing is None and self.state_dir.exists():
-            shutil.rmtree(self.state_dir)
+        if existing is None and self._has_state():
+            self._clear()
             self.progress.log("Checkpoint: existing state is invalid; starting fresh")
         if existing is not None and existing.get("cache_id") != self.cache_id:
-            shutil.rmtree(self.state_dir)
+            self._clear()
             existing = None
             self.progress.log(
                 "Checkpoint: existing state does not match this export; starting fresh"
@@ -169,7 +169,7 @@ class CheckpointStore:
                         existing.get("completed_ranges", [])
                     )
                 else:
-                    shutil.rmtree(self.state_dir)
+                    self._clear()
                     self.rendered_dir.mkdir(parents=True, exist_ok=True)
                     self.clusters_dir.mkdir(parents=True, exist_ok=True)
                     existing = None
@@ -180,7 +180,7 @@ class CheckpointStore:
                 self._completed_indices = self._scan_completed_indices()
                 migrated = bool(self._completed_indices)
             else:
-                shutil.rmtree(self.state_dir)
+                self._clear()
                 self.rendered_dir.mkdir(parents=True, exist_ok=True)
                 self.clusters_dir.mkdir(parents=True, exist_ok=True)
                 existing = None
@@ -243,9 +243,30 @@ class CheckpointStore:
         self._write_state_payload(status="failed")
 
     def complete(self) -> None:
-        if self.state_dir.exists():
-            shutil.rmtree(self.state_dir)
+        """Drop the checkpoint but keep the renders: `sync` rebuilds files from them."""
+        from .syncstate import renders_dir
+
+        if self.rendered_dir.is_dir():
+            kept = renders_dir(self.root)
+            if kept.exists():
+                shutil.rmtree(kept)
+            kept.parent.mkdir(parents=True, exist_ok=True)
+            self.rendered_dir.replace(kept)
+        self._clear()
         self.progress.log("Checkpoint: complete; removed saved state")
+
+    def _has_state(self) -> bool:
+        return any(
+            path.exists()
+            for path in (self.state_path, self.rendered_dir, self.clusters_dir)
+        )
+
+    def _clear(self) -> None:
+        """Remove the checkpoint's own files; `.tocode/` also holds sync state."""
+        for path in (self.rendered_dir, self.clusters_dir):
+            if path.exists():
+                shutil.rmtree(path)
+        self.state_path.unlink(missing_ok=True)
 
     def completed_addresses(self) -> list[int]:
         return [self.addresses[index] for index in sorted(self._completed_indices)]
@@ -639,7 +660,23 @@ def export_binary(
         raise
     if context.checkpoint is not None:
         context.checkpoint.complete()
+    write_sync_manifest(context)
     return _summary(context)
+
+
+def write_sync_manifest(context: ExportContext) -> None:
+    """Record the file layout so `sync` can update this export in place."""
+    from .syncstate import write_manifest
+
+    write_manifest(
+        _need(context.root),
+        clusters=context.clusters,
+        backend=context.analyzer.backend_name,
+        decompiler=context.analyzer.decompiler_label,
+        tree=context.tree_enabled,
+        entropy=context.entropy_enabled,
+        origin=context.origin,
+    )
 
 
 def _prepare_tree(context: ExportContext) -> None:
@@ -2474,7 +2511,14 @@ def _summary_function(routine: Routine, path: Path, text: str) -> str:
     return "\n".join(lines)
 
 
-def _write_metadata(context: ExportContext) -> None:
+def _write_metadata(
+    context: ExportContext, *, publish: bool = True, docs: bool = True
+) -> None:
+    """Write every JSON document and header.
+
+    ``sync`` passes ``publish=False`` (the database is already where it
+    belongs) and ``docs=False`` when it cannot rebuild AGENTS.md faithfully.
+    """
     analysis = _need(context.analysis)
     root = _need(context.root)
     header = _need(context.header_path)
@@ -2618,6 +2662,10 @@ def _write_metadata(context: ExportContext) -> None:
         ("AGENTS.md", write_docs),
         ("export-manifest.json", lambda: _set_manifest(context)),
     ]
+    skipped = ({"backend database"} if not publish else set()) | (
+        {"AGENTS.md"} if not docs else set()
+    )
+    steps = [(label, run) for label, run in steps if label not in skipped]
 
     context.progress.log(f"Writing metadata and indexes ({len(steps)} steps)")
     with context.progress.bar(total=len(steps), desc="metadata", unit="step") as bar:
@@ -3017,6 +3065,20 @@ def build_export_agents(
         "- Treat recovered names and types as hints, not ground truth.",
         "- Cite file paths, function names, addresses, and line numbers for every major claim.",
         "- Be explicit about uncertainty and unresolved symbols.",
+        "",
+        "## Live Database (MCP)",
+        "",
+        "This export can be updated from its database. With the `tocode` MCP server "
+        "(`tocode mcp`; register it with `claude mcp add --scope user tocode -- tocode mcp`), "
+        "`open` this folder, query the live decompiler (`decompile`, `xrefs`, `types`, ...), "
+        "record findings in the database (`rename`, `set_type`, `declare_types`, "
+        "`rename_local`, `set_comment`, or `eval` scripts), then `sync`: changed functions, "
+        "their callers, and code using changed types are re-rendered here, and only files "
+        "whose content changed are rewritten.",
+        "- Record findings as names, types, and comments in the database, not as edits to "
+        "`src/raw/`: a sync regenerates those files.",
+        "- After editing the database in the IDA or Binary Ninja UI, run "
+        "`tocode sync <this folder> --full`.",
         "",
     ]
     if tree_enabled:

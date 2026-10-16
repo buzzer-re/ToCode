@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import enum
 import os
+import re
 from pathlib import Path
 import signal
 import threading
@@ -108,6 +109,7 @@ class AnalysisProgress:
 class TypeClass(enum.Enum):
     StructureTypeClass = 1
     IntegerTypeClass = 2
+    EnumerationTypeClass = 3
 
 
 class DisassemblyOption:
@@ -201,6 +203,72 @@ class _Function:
         operation = self._llil.get(int(address))
         return None if operation is None else SimpleNamespace(operation=operation)
 
+    # -- edits (the subset ToCode's live tools use) ----------------------------
+
+    comment = ""
+
+    def set_user_type(self, type_obj) -> None:
+        """Takes a `_ParsedType` of `ret name(type a, ...)`."""
+        match = re.match(r"\s*(.+?)\s*\b(\w+)\s*\((.*)\)\s*$", type_obj.decl)
+        if match is None:
+            raise ValueError(f"not a function type: {type_obj.decl}")
+        self.return_type = match.group(1).strip()
+        params = []
+        for index, part in enumerate(
+            p for p in match.group(3).split(",") if p.strip() and p.strip() != "void"
+        ):
+            words = part.strip().rsplit(" ", 1)
+            name = words[1].lstrip("*") if len(words) == 2 else f"a{index + 1}"
+            ptype = (
+                (words[0] + "*" * (len(words[1]) - len(words[1].lstrip("*"))))
+                if len(words) == 2
+                else part.strip()
+            )
+            params.append(_Var(name, ptype, 100 + index))
+        locals_ = [var for var in self.vars if var not in self.parameter_vars]
+        self.parameter_vars = params
+        self.vars = params + locals_
+
+    def set_comment_at(self, address: int, text: str) -> None:
+        self._view._comments[int(address)] = text
+
+    def create_user_var(self, var, type_, name) -> None:
+        var.name = name
+        var.type = str(getattr(type_, "decl", type_))
+
+
+class _ParsedType:
+    """What `parse_type_string` returns: keeps the declaration text."""
+
+    def __init__(self, decl: str) -> None:
+        self.decl = decl.strip().rstrip(";")
+
+    def __str__(self) -> str:
+        return self.decl
+
+
+class _UserType:
+    """A struct/union/enum declared through `define_user_type`."""
+
+    width = 8
+
+    def __init__(self, source: str) -> None:
+        self.source = source.strip()
+        kind = self.source.split(None, 1)[0]
+        self.type_class = (
+            TypeClass.EnumerationTypeClass
+            if kind == "enum"
+            else TypeClass.StructureTypeClass
+        )
+        self.type = (
+            "StructureVariant.UnionStructureType"
+            if kind == "union"
+            else "StructureVariant.StructStructureType"
+        )
+
+    def __str__(self) -> str:
+        return self.source
+
 
 class _StructType:
     type_class = TypeClass.StructureTypeClass
@@ -227,6 +295,14 @@ class FileMetadata:
 
     def close(self) -> None:
         self.closed = True
+
+    def save_auto_snapshot(self, progress_func=None, settings=None) -> bool:
+        """Saves into the .bndb the view was opened from."""
+        _note(f"save_auto_snapshot {Path(self.filename).name}")
+        Path(self.filename).write_text(
+            _MAGIC + self.original_filename, encoding="utf-8"
+        )
+        return True
 
 
 class BinaryView:
@@ -356,16 +432,110 @@ class BinaryView:
         }
         self.types = {"point": _StructType(), "score_t": _IntType()}
         self.type_container = SimpleNamespace(name="container")
-        self._linear = {
-            0x401000: [
-                "int32_t main(int32_t argc)",
-                "{",
-                "    helper();",
-                '    return puts("hello");',
-                "}",
-            ],
-            0x401080: ["void helper()", "{", "    return;", "}"],
-        }
+        self._comments: dict[int, str] = {}
+        self._data_vars: dict[int, object] = {}
+        self._main, self._helper, self._puts = main, helper, puts
+
+    # -- pseudo C, rendered from the current names, types and comments --------
+
+    def _prototype(self, func) -> str:
+        params = ", ".join(f"{var.type} {var.name}" for var in func.parameter_vars)
+        return f"{func.return_type} {func.name}({params})"
+
+    def _pseudo_c(self, func) -> list[str]:
+        body: list[str] = []
+        if func.comment:
+            body.append(f"    // {func.comment}")
+        for address in sorted(self._comments):
+            if func.start <= address <= func.highest_address:
+                body.append(f"    // {self._comments[address]}")
+        for var in func.vars:
+            if var not in func.parameter_vars and var.name != "total":
+                body.append(f"    {var.type} {var.name};")
+        if func is self._main:
+            body += [
+                f"    {self._helper.name}();",
+                f'    return {self._puts.name}("hello");',
+            ]
+        elif func is self._helper:
+            point = self.types.get("point")
+            fields = point.source.count(";") - 1 if isinstance(point, _UserType) else 2
+            body.append(f"    struct point *p; /* point has {fields} fields */")
+            body += [f"    {callee.name}();" for callee in func.callees]
+            body.append("    return;")
+        else:
+            body.append("    return 0;")
+        return [self._prototype(func), "{", *body, "}"]
+
+    # -- edits ------------------------------------------------------------------
+
+    def parse_type_string(self, decl: str):
+        match = re.search(r"(\w+)\s*(?:\(|$|\[)", decl.strip().rstrip(";"))
+        return _ParsedType(decl), (match.group(1) if match else "")
+
+    def parse_types_from_string(self, source: str):
+        found = {}
+        for match in re.finditer(
+            r"\b(struct|union|enum)\s+(\w+)\s*\{[^}]*\}\s*;", source
+        ):
+            found[match.group(2)] = _UserType(match.group(0))
+        if not found:
+            raise SyntaxError("no type declarations")
+        return SimpleNamespace(types=found, variables={}, functions={})
+
+    def define_user_type(self, name, type_obj) -> None:
+        _note(f"define_user_type {name}")
+        self.types[str(name)] = type_obj
+
+    def define_user_symbol(self, symbol) -> None:
+        for existing in self._symbols:
+            if existing.address == symbol.address:
+                existing.name = existing.short_name = symbol.name
+                return
+        self._symbols.append(
+            SimpleNamespace(
+                address=symbol.address,
+                name=symbol.name,
+                short_name=symbol.name,
+                type=symbol.type,
+                binding=SymbolBinding.GlobalBinding,
+                namespace=SimpleNamespace(name=None),
+                ordinal=None,
+            )
+        )
+
+    def define_user_data_var(self, address, type_obj) -> None:
+        self._data_vars[int(address)] = type_obj
+
+    def undefine_user_data_var(self, address) -> None:
+        self._data_vars.pop(int(address), None)
+
+    def set_comment_at(self, address, text) -> None:
+        self._comments[int(address)] = text
+
+    def add_user_function(self, address) -> None:
+        address = int(address)
+        if address in self._by_start:
+            return
+        func = _Function(
+            self,
+            address,
+            f"sub_{address:x}",
+            size=0x10,
+            symbol_type=SymbolType.FunctionSymbol,
+        )
+        # The fake's discovered function is called by helper.
+        self._helper.callees.append(func)
+        func.callers = [self._helper]
+        self.functions.append(func)
+        self._by_start[address] = func
+        _note(f"add_user_function 0x{address:x}")
+
+    def remove_user_function(self, func) -> None:
+        self.functions = [item for item in self.functions if item is not func]
+        self._by_start.pop(func.start, None)
+        for item in self.functions:
+            item.callees = [callee for callee in item.callees if callee is not func]
 
     @property
     def segments(self):
@@ -438,9 +608,17 @@ class BinaryView:
         if cursor.done:
             return []
         cursor.done = True
-        return [
-            _Line(text, cursor.address) for text in self._linear.get(cursor.address, [])
-        ]
+        func = self._by_start.get(cursor.address)
+        if func is None or func.hlil is None:
+            return []
+        return [_Line(text, cursor.address) for text in self._pseudo_c(func)]
+
+
+class Symbol:
+    def __init__(self, sym_type, address, name) -> None:
+        self.type = sym_type
+        self.address = int(address)
+        self.name = name
 
 
 def load(source, update_analysis: bool = True, progress_func=None, options=None):

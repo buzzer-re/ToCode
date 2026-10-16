@@ -227,6 +227,16 @@ tocode firmwareX.bin.i64 -o firmwareX_decompiled/
 
 Interrupted exports save progress automatically. Rerun the same command to resume, or add `--restart` to start over.
 
+### Live analysis for agents (MCP)
+
+`tocode mcp` keeps the decompiler open so an agent can query it, record what it learns (names, types, structs, comments, or scripts run in the database), and `sync` the export: changed functions and the code that uses them are re-rendered, and only those files change.
+
+```bash
+tocode mcp --install claude          # or --install codex, or --config for other MCP clients
+tocode skill install                 # teach Claude Code and Codex the ToCode workflow
+tocode sync program_decompiler/      # after editing the database in IDA or Binary Ninja
+```
+
 ### Binary Ninja
 
 The Binary Ninja backend uses Binary Ninja's own analysis and Pseudo C. ToCode reaches Binary Ninja in one of three ways, tried in this order (`--binja-transport headless`, `mcp` or `rpyc` forces one):

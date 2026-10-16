@@ -226,7 +226,14 @@ def test_export_binary_writes_source_tree_and_metadata(tmp_path: Path) -> None:
     assert "Export run started" in (summary.root_dir / "tocode.log").read_text(
         encoding="utf-8"
     )
-    assert not (summary.root_dir / ".tocode").exists()
+    # The checkpoint is gone; what `sync` needs stays.
+    state = summary.root_dir / ".tocode"
+    assert not (state / "checkpoint.json").exists()
+    assert not (state / "rendered").exists()
+    assert (state / "sync" / "manifest.json").is_file()
+    assert (
+        len(list((state / "sync" / "renders").glob("*.json"))) == summary.function_count
+    )
 
 
 def test_relativize_sources_strips_common_root() -> None:
@@ -391,7 +398,7 @@ def test_export_binary_resumes_from_checkpoint_after_interrupt(tmp_path: Path) -
 
     assert resumed.decompile_calls == 1
     assert summary.function_count == 2
-    assert not (export_root / ".tocode").exists()
+    assert not (export_root / ".tocode" / "checkpoint.json").exists()
     resumed_log = (export_root / "tocode.log").read_text(encoding="utf-8")
     assert "Checkpoint: resuming at 1/2 with 1 cached functions" in resumed_log
     assert "export main 0x1000 - 48 bytes cached" not in resumed_log

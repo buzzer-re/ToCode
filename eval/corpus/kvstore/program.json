@@ -1,0 +1,22 @@
+{
+  "name": "kvstore",
+  "cflags": [
+    "-O0",
+    "-fno-omit-frame-pointer"
+  ],
+  "sources": [
+    "main.c",
+    "kv.c"
+  ],
+  "headers": [
+    "kv.h"
+  ],
+  "tests": [
+    {
+      "stdin": "set a 1\nset b 2\nget a\nget c\ncount\n"
+    },
+    {
+      "stdin": "set k 5\nset k 7\nget k\ndel k\ndel k\ncount\nbogus\n"
+    }
+  ]
+}

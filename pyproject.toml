@@ -113,3 +113,7 @@ version = { attr = "tocode.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# The agent skill ships inside the package (`tocode skill install`).
+[tool.setuptools.package-data]
+tocode = ["skill/*.md", "skill/references/*.md"]
