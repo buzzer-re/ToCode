@@ -62,7 +62,10 @@ Write tests so they do not depend on the machine running them: no network,
 no installed backend or runtime, and no particular amount of free memory.
 `tests/dotnet_fixtures.py` builds synthetic .NET files, and
 `tests/test_apk_export.py` / `tests/test_dotnet_export.py` show how to drive a
-whole export with fake sessions.
+whole export with fake sessions. The live server tests (`tests/test_live_*.py`)
+run `tocode mcp` in a subprocess through `tests/live_client.py` against the
+fake Binary Ninja API; `python tests/live_client.py <export> 'decompile={"target":"main"}'`
+drives a real server by hand.
 
 ## Checking a change on real inputs
 

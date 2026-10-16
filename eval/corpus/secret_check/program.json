@@ -1,0 +1,12 @@
+{
+  "name": "secret_check",
+  "cflags": [
+    "-O0",
+    "-fno-omit-frame-pointer"
+  ],
+  "sources": [
+    "secret_check.c"
+  ],
+  "tests": [],
+  "note": "runs forever (an injection target); scored on names and types only"
+}

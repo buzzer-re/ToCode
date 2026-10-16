@@ -9,6 +9,9 @@ class _Printer:
     ):
         if escaping != 0:
             raise AssertionError("ToCode asks for unescaped C names")
+        source = getattr(type, "source", None)
+        if source is not None:  # declared through define_user_type
+            return source.splitlines()
         if str(type) == "struct point":
             return [f"struct {name}", "{", "    int32_t x;", "    int32_t y;", "};"]
         return [f"typedef {type} {name};"]

@@ -4,15 +4,18 @@ This repository contains ToCode, a Python-only binary exporter. ToCode takes one
 
 ## Scope
 
-- Keep the project focused on the exporter CLI and Python library modules.
-- Do not add web UI, server, container wrapper, shortcut, installer, or background service behavior.
+- Keep the project focused on the exporter CLI, the live MCP server (`tocode mcp`), and Python library modules.
+- Do not add web UI, network servers, container wrappers, shortcuts, installers, or background services. The one long-running mode is the stdio MCP server, started by an MCP client and ending with it.
 - Do not add chat, report generation, or secondary analysis stages.
 - Export one project tree from one binary or IDA database: raw decompiler output, assembly, summaries, section data, JSON metadata, optional IDA database, and optional scanner-friendly C.
 - Generated export trees must include their own `AGENTS.md` for agents analyzing that exported binary.
 
 ## Project Layout
 
-- `src/tocode/cli.py`: command-line entry point for `tocode`.
+- `src/tocode/cli.py`: command-line entry point for `tocode` (subcommands `mcp`, `sync`, `skill` are dispatched before the flat parser).
+- `src/tocode/live/`: the live layer. `jsonrpc.py` stdio MCP transport (standard library), `server.py` `tocode mcp` entry, `tools.py` the tool table (schemas, annotations, timeouts), `sessions.py` worker lifecycle (one spawned process per session, cap, idle close, timeouts, crash recovery), `targets.py` what `open` resolves to, `worker.py` the per-session process and query/eval operations, `edits.py` edit tools per backend and saving, `sync.py` incremental export updates and the `export` operation, `setup.py` `tocode sync`, `tocode skill install`, and MCP client registration. .NET sessions: `dotnet_live.py` (`DotnetLiveSession`, picked by `worker.open_session` for `backend == "dotnet"`), `dotnet_edits.py` (the edit log and renames), `dotnet_sync.py` (rewrites the touched types' `.cs`/`.il` and the documents).
+- `src/tocode/syncstate.py`: what an export keeps for `sync` (`.tocode/sync/manifest.json` with the file layout, `.tocode/sync/renders/` with each function's render).
+- `src/tocode/skill/`: the agent skill (`SKILL.md`, `references/*.md`), shipped as package data.
 - `src/tocode/__init__.py`: package version and `export_from_binaryview()`, the in-UI Binary Ninja library entry.
 - `src/tocode/analysis.py`: backend-neutral binary inventory and call graph normalization.
 - `src/tocode/backends/`: IDA Domain, radare2, angr, and Binary Ninja (`binja_headless.py` over the in-process `binaryninja` API, `binja_mcp.py` over Binary Ninja's MCP server, `binja.py` over RPyc or an injected UI view) session adapters, plus the ASC/droidasc APK backend (`asc.py`: APK set discovery, DEX inventory, worker-side class decompilation).
@@ -27,6 +30,7 @@ This repository contains ToCode, a Python-only binary exporter. ToCode takes one
 - `src/tocode/parallel.py`: worker-count selection.
 - `src/tocode/schema.py`: dataclasses shared across the exporter.
 - `tests/`: unit tests for algorithms, CLI helpers, and export tree generation.
+- `eval/`: the blind source-recovery benchmark (`recover.py`, `corpus/`): a headless agent with only ToCode recovers a stripped program's source and a judge scores it. Not shipped in the package; run it after changing the live tools or the skill.
 
 ## Export Contract
 
@@ -54,6 +58,7 @@ The CLI accepts a regular binary file or IDA database and writes a project direc
 - `tocode.log`
 - generated export `AGENTS.md`
 - generated export `CLAUDE.md`
+- `.tocode/sync/manifest.json` and `.tocode/sync/renders/*.json` (what `sync` updates from)
 
 When the IDA backend is used, the export also contains:
 
@@ -119,6 +124,44 @@ Framework/runtime assemblies and native runtime libraries inside bundles and pac
   is a core runtime dependency so the backend works out of the box.
 - Pin new dependencies exactly (`==`) and capture them in `uv.lock`.
 - Keep dependencies minimal and tied to exporting a project.
+
+## Live server (MCP) and sync
+
+- `tocode mcp` speaks MCP over stdio. Nothing but protocol may reach fd 1:
+  `server.protect_stdout` moves it to stderr before backends load, and workers
+  log to `<export>/.tocode/live.log`.
+- Every session is a spawned worker process (`sessions.SessionManager`): a
+  backend crash, OOM kill, or a call past its timeout stops only that worker,
+  which reopens on the next call (the reply says unsaved edits were lost).
+  Keep backend calls out of the supervisor process.
+- Database edits go through `live/edits.py` only, so each edit records the
+  functions it makes stale (`LiveSession.dirty`); add a backend method there
+  rather than calling backend APIs from tools. angr is query-only.
+- `sync` never renumbers or rewrites a source file whose content did not
+  change; existing functions keep their file, new ones join a caller's file
+  (else `discovered.c`). It rewrites metadata through the exporter's own
+  writers (`_write_metadata(publish=False)`), and refreshes folder links when
+  the export belongs to a folder export.
+- `CheckpointStore.complete()` keeps the renders for sync and removes only the
+  checkpoint's own files; `.tocode/` also holds sync state and live logs.
+- .NET live: the database is the edit log `<export>/.tocode/dotnet/edits.json`
+  (edits addressed by assembly and metadata token), replayed onto the
+  original input on open; `patched/<Assembly>.dll` are renamed copies written
+  from it (tokens preserved). Renames change dnlib objects and update only the
+  affected inventory records and name-index entries; patched copies are
+  written when a query decompiles an edited assembly; the inventory reloads
+  once per sync. Local renames and comments are text edits applied when C# is
+  rendered (neither lives in metadata). Keep edits O(what they touch): use the
+  reverse indexes (`member_owner`, `field_users`, the word index) rather than
+  scanning all methods or files.
+- `src/tocode/skill/references/tools.md` is generated from `live/tools.py`
+  (`python -m tocode.live.tools > src/tocode/skill/references/tools.md`);
+  `tests/test_live_setup.py` fails when it is stale.
+- The skill, tool descriptions, and server instructions must never use names
+  from `eval/corpus` (the benchmark would no longer be blind); a test checks.
+- Tests drive the real server through `tests/live_client.py` against the
+  on-disk fake Binary Ninja (`tests/fake_binja/`, which supports the edit
+  API); the `export` fixture in `tests/conftest.py` builds a fake export.
 
 ## Binary Ninja backend
 

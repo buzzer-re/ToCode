@@ -163,6 +163,8 @@ def build_folder_agents(
         "- Follow a call across files with `mappings.json` or the `tocode-link` comments instead of searching by name.",
         "- A link whose `target_status` is not `decompiled` (filtered, runtime library, failed) still names the file and address; export it with `--only` to read it.",
         "- Cite file paths, function names, addresses, and line numbers for every major claim.",
+        "- With the `tocode` MCP server, `open` this folder and address each binary as "
+        '`session="<relative path>"`; `sync` updates that binary\'s export and these links.',
         "",
         "## Binaries",
         "",

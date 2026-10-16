@@ -258,7 +258,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+SUBCOMMANDS = ("mcp", "sync", "skill")
+
+
 def main(argv: list[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] in SUBCOMMANDS:
+        return _subcommand(raw[0], raw[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     progress = Progress(enabled=not args.quiet)
@@ -554,6 +560,23 @@ def _run_folder(folder: Path, *, args: argparse.Namespace, progress: Progress) -
             print(f"failed: {line}", file=sys.stderr)
         print(f"Exported in {_format_duration(summary.seconds)}")
     return 130 if summary.interrupted else 0
+
+
+def _subcommand(name: str, argv: list[str]) -> int:
+    """`tocode mcp ...` (a file literally named like a subcommand: use ./name)."""
+    if name == "mcp":
+        from .live.server import main as mcp_main
+
+        return mcp_main(argv)
+    if name == "sync":
+        from .live.setup import sync_main
+
+        return sync_main(argv)
+    if name == "skill":
+        from .live.setup import skill_main
+
+        return skill_main(argv)
+    raise AssertionError(name)
 
 
 def _ask_on_stderr(prompt: str) -> str:

@@ -109,67 +109,7 @@ Four backends are supported, selected with `--backend` (default `auto`, which pr
 
 Other disassemblers may be added in the future.
 
-### .NET assemblies
-
-ToCode decompiles .NET assemblies (`.dll`, `.exe`), single-file bundles, apphost launchers, and NuGet packages to C#, and writes the IL of each type next to it. You need a .NET 9 or newer runtime.
-
-Decompilation uses [dnlib](https://github.com/0xd4d/dnlib) and [ICSharpCode.Decompiler](https://github.com/icsharpcode/ILSpy), which ToCode doesn't include. The first .NET export asks once whether to download them from nuget.org and checks them against pinned SHA-256 hashes. Scripts and agents can't answer that prompt, so run `tocode --setup-dotnet` beforehand. The files are stored per user (`~/.local/share/tocode/dotnet` on Linux, or `TOCODE_DOTNET_LIB_DIR`); delete that folder to reset.
-
-Native code in the program (mixed-mode assemblies, bundled libraries, P/Invoke libraries next to the input) goes to the native backend unless you pass `--no-native`. Bundles and packages carry the .NET runtime itself, which is skipped unless you add `--include-framework`. `--as-native` treats a .NET file as a plain PE.
-
-```bash
-tocode App.dll
-tocode publish/App               # single-file bundle or apphost
-tocode Vendor.Lib.1.0.0.nupkg
-```
-
-### Android APKs
-
-`tocode app.apk` (also `.apks`/`.xapk` bundles) uses [ASC](https://github.com/MG1937/ASC) (`droidasc`, a core dependency) for the DEX side and the regular native backends for every shared object in the package:
-
-- `src/raw/<package>/<Class>.java`: one decompiled Java file per class, folders follow Java packages (no clustering, no summaries).
-- `AndroidManifest.xml` + `manifest.json`: decoded and parsed manifest (permissions, components with intent filters and exported state, application attributes, split manifests).
-- `classes.json`, `functions.json`, `function-index.json`, `strings.json`, `imports.json`, `exports.json` (exported components + JNI methods), `reachable.json` (from manifest components), `package-graph.json`, `sections.json`, `triage.json`.
-- `lib/<abi>/*.so`: every native library; `native/<abi>/<lib>/`: a full ToCode export of each one, made while the DEX side decompiles. `native-libs.json` records the status of each; a library that fails never fails the APK export. `--no-native` skips them, and `--backend` picks their backend.
-- `data/apk/**`: every other APK entry verbatim; `data/res/**/*.xml` and `data/resources.json`: decoded binary XML and `resources.arsc`.
-
-`base.apk` automatically merges sibling `split_*.apk` files (config and ABI splits) into the same project; `--no-splits` exports it alone. The default output directory is `<manifest package>_decompiler`.
-
-```bash
-tocode base.apk                     # DEX + all splits + native libs (IDA/r2/angr)
-tocode app.apks --no-native -j 4    # bundle, DEX/Android side only
-```
-
-
-### Folders
-
-Point `tocode` at a directory (a game folder, a Linux app, a macOS `.app` bundle, a .NET publish folder) and it exports every binary in it, then links them together.
-
-The links come from the binaries themselves: import and load tables, resolved with each platform's loader rules (`@rpath`/`@loader_path` on macOS, `RPATH`/`RUNPATH` and symbol versions on Linux, the application directory and forwarders on Windows, AssemblyRef/MemberRef signatures and P/Invoke for .NET). ToCode never matches by name similarity. When the executable calls `foo` from `libfoo.so`, the link tells you which file defines it and the file and line range of that function in the library's export.
-
-```text
-Game_decompiled/
-  AGENTS.md, CLAUDE.md, project.json, export-manifest.json, tocode.log
-  inventory.json          # every file: kind, arch, hash, export status
-  dependency-graph.json   # which file loads which, and the loader rule used
-  mappings.json           # every import -> defining file, function, line range; its call sites
-  bin/game/               # one regular export per binary, mirroring the folder
-  lib/libengine.so/
-```
-
-Inside each export, `imports.json` and `functions.json` carry the same links, and calls into other files get a trailing comment in the decompiled source: `/* tocode-link: foo -> lib/libfoo.so/src/raw/app/x.c:23-45 */`. The comments never add lines, so all line numbers stay valid.
-
-Several binaries are exported at once, each in its own process, so a crash or out-of-memory kill only fails that file. `--parallel-files N` sets how many run at once and `-j N` the workers inside each (default: from your CPUs and free memory). Re-running the same command skips finished binaries and resumes the rest. Bundled runtimes (VC++/MinGW/libstdc++ copies, the .NET framework) are linked but only decompiled with `--include-framework`. Universal Mach-O files use the main executable's architecture (`--arch` to override).
-
-```bash
-tocode --plan Game/                          # list binaries, export order, and links; decompile nothing
-tocode Game/ --only 'bin/*' --only '**/libengine.so'   # export a subset; the rest stays linked
-tocode Game/ --exclude '*.dll'               # skip matches
-tocode Game/ --links-only                    # recompute links over existing exports
-tocode Game/ -pf 8 -j 2                     # 8 binaries at once (--parallel-files), 2 workers each
-```
-
-### Using
+# Using
 
 ToCode supports Windows, Linux, and macOS with Python 3.10 or newer.
 
@@ -209,7 +149,7 @@ uv sync --locked
 uv tool install --force --editable .
 ```
 
-### Example
+## Example
 
 ```
 tocode firmwareX.bin -o firmwareX_decompiled/
@@ -219,13 +159,97 @@ codex
 # Inside your agent shell, type your goals, e.g.: "Give me a brief overview of the boot process of this firmware."
 ``` 
 
-#### From an ongoing RE work
+### From an ongoing RE work
 
 ```
 tocode firmwareX.bin.i64 -o firmwareX_decompiled/
 ```
 
 Interrupted exports save progress automatically. Rerun the same command to resume, or add `--restart` to start over.
+
+# Live analysis for agents (MCP)
+
+`tocode mcp` keeps the decompiler open so an agent can query it, record what it learns (names, types, structs, comments, or scripts run in the database), and `sync` the export: changed functions and the code that uses them are re-rendered, and only those files change. It works on .NET exports too: renames are kept as an edit log, and the renamed assemblies are written to `patched/`.
+
+```bash
+tocode mcp --install claude          # or --install codex, or --config for other MCP clients
+tocode skill install                 # teach Claude Code and Codex the ToCode workflow
+tocode sync program_decompiler/      # after editing the database in IDA or Binary Ninja
+```
+
+### .NET assemblies
+
+ToCode decompiles .NET assemblies (`.dll`, `.exe`), single-file bundles, apphost launchers, and NuGet packages to C#, and writes the IL of each type next to it. You need a .NET 9 or newer runtime.
+
+<details>
+<summary>More on .NET</summary>
+
+Decompilation uses [dnlib](https://github.com/0xd4d/dnlib) and [ICSharpCode.Decompiler](https://github.com/icsharpcode/ILSpy), which ToCode doesn't include. The first .NET export asks once whether to download them from nuget.org and checks them against pinned SHA-256 hashes. Scripts and agents can't answer that prompt, so run `tocode --setup-dotnet` beforehand. The files are stored per user (`~/.local/share/tocode/dotnet` on Linux, or `TOCODE_DOTNET_LIB_DIR`); delete that folder to reset.
+
+Native code in the program (mixed-mode assemblies, bundled libraries, P/Invoke libraries next to the input) goes to the native backend unless you pass `--no-native`. Bundles and packages carry the .NET runtime itself, which is skipped unless you add `--include-framework`. `--as-native` treats a .NET file as a plain PE.
+
+```bash
+tocode App.dll
+tocode publish/App               # single-file bundle or apphost
+tocode Vendor.Lib.1.0.0.nupkg
+```
+
+</details>
+
+### Android APKs
+
+`tocode app.apk` (also `.apks`/`.xapk` bundles) uses [ASC](https://github.com/MG1937/ASC) (`droidasc`, a core dependency) for the DEX side and the regular native backends for every shared object in the package:
+
+<details>
+<summary>More on APKs</summary>
+
+- `src/raw/<package>/<Class>.java`: one decompiled Java file per class, folders follow Java packages (no clustering, no summaries).
+- `AndroidManifest.xml` + `manifest.json`: decoded and parsed manifest (permissions, components with intent filters and exported state, application attributes, split manifests).
+- `classes.json`, `functions.json`, `function-index.json`, `strings.json`, `imports.json`, `exports.json` (exported components + JNI methods), `reachable.json` (from manifest components), `package-graph.json`, `sections.json`, `triage.json`.
+- `lib/<abi>/*.so`: every native library; `native/<abi>/<lib>/`: a full ToCode export of each one, made while the DEX side decompiles. `native-libs.json` records the status of each; a library that fails never fails the APK export. `--no-native` skips them, and `--backend` picks their backend.
+- `data/apk/**`: every other APK entry verbatim; `data/res/**/*.xml` and `data/resources.json`: decoded binary XML and `resources.arsc`.
+
+`base.apk` automatically merges sibling `split_*.apk` files (config and ABI splits) into the same project; `--no-splits` exports it alone. The default output directory is `<manifest package>_decompiler`.
+
+```bash
+tocode base.apk                     # DEX + all splits + native libs (IDA/r2/angr)
+tocode app.apks --no-native -j 4    # bundle, DEX/Android side only
+```
+
+</details>
+
+### Folders
+
+Point `tocode` at a directory (a game folder, a Linux app, a macOS `.app` bundle, a .NET publish folder) and it exports every binary in it, then links them together.
+
+<details>
+<summary>More on folders</summary>
+
+The links come from the binaries themselves: import and load tables, resolved with each platform's loader rules (`@rpath`/`@loader_path` on macOS, `RPATH`/`RUNPATH` and symbol versions on Linux, the application directory and forwarders on Windows, AssemblyRef/MemberRef signatures and P/Invoke for .NET). ToCode never matches by name similarity. When the executable calls `foo` from `libfoo.so`, the link tells you which file defines it and the file and line range of that function in the library's export.
+
+```text
+Game_decompiled/
+  AGENTS.md, CLAUDE.md, project.json, export-manifest.json, tocode.log
+  inventory.json          # every file: kind, arch, hash, export status
+  dependency-graph.json   # which file loads which, and the loader rule used
+  mappings.json           # every import -> defining file, function, line range; its call sites
+  bin/game/               # one regular export per binary, mirroring the folder
+  lib/libengine.so/
+```
+
+Inside each export, `imports.json` and `functions.json` carry the same links, and calls into other files get a trailing comment in the decompiled source: `/* tocode-link: foo -> lib/libfoo.so/src/raw/app/x.c:23-45 */`. The comments never add lines, so all line numbers stay valid.
+
+Several binaries are exported at once, each in its own process, so a crash or out-of-memory kill only fails that file. `--parallel-files N` sets how many run at once and `-j N` the workers inside each (default: from your CPUs and free memory). Re-running the same command skips finished binaries and resumes the rest. Bundled runtimes (VC++/MinGW/libstdc++ copies, the .NET framework) are linked but only decompiled with `--include-framework`. Universal Mach-O files use the main executable's architecture (`--arch` to override).
+
+```bash
+tocode --plan Game/                          # list binaries, export order, and links; decompile nothing
+tocode Game/ --only 'bin/*' --only '**/libengine.so'   # export a subset; the rest stays linked
+tocode Game/ --exclude '*.dll'               # skip matches
+tocode Game/ --links-only                    # recompute links over existing exports
+tocode Game/ -pf 8 -j 2                     # 8 binaries at once (--parallel-files), 2 workers each
+```
+
+</details>
 
 ### Binary Ninja
 

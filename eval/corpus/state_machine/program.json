@@ -1,0 +1,12 @@
+{
+  "name": "state_machine",
+  "cflags": [
+    "-O0",
+    "-fno-omit-frame-pointer"
+  ],
+  "sources": [
+    "state_machine.c"
+  ],
+  "tests": [],
+  "note": "runs forever (an injection target); scored on names and types only"
+}
