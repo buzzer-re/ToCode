@@ -7,7 +7,7 @@ from typing import Any
 
 __all__ = ["__version__", "export_from_binaryview"]
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 
 def export_from_binaryview(
