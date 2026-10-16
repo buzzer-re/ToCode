@@ -128,6 +128,22 @@ def export_target(
     project = _read_json(export_dir / "project.json")
     binary = Path(str(project.get("binary") or export_dir.name))
     recorded = project.get("backend") or "auto"
+    if recorded == "dotnet":
+        # A .NET export: the database is its edit log, replayed onto the input.
+        if not binary.is_file():
+            raise ToCodeError(
+                f"the .NET export at {export_dir} needs its input {binary}, which is gone"
+            )
+        return Target(
+            name=name or relpath or _session_name(binary),
+            open_path=binary,
+            binary=binary,
+            backend="dotnet",
+            export_dir=export_dir,
+            database=database or dotnet_edit_log(export_dir),
+            folder=folder,
+            relpath=relpath,
+        )
     own = database or own_database(export_dir, binary, project)
     if own is not None:
         open_path = own
@@ -159,6 +175,27 @@ def file_target(
     backend: str | None = None,
     name: str | None = None,
 ) -> Target:
+    if (
+        not is_database(path)
+        and (backend in (None, "auto", "dotnet"))
+        and _is_dotnet(path)
+    ):
+        export_dir = path.parent / default_output_name(path)
+        attached = None
+        if is_export_dir(export_dir):
+            recorded = Path(
+                str(_read_json(export_dir / "project.json").get("binary") or "")
+            )
+            if recorded.resolve() == path.resolve():
+                attached = export_dir
+        return Target(
+            name=name or _session_name(path),
+            open_path=path,
+            binary=path,
+            backend="dotnet",
+            export_dir=attached,
+            database=database or (dotnet_edit_log(attached) if attached else None),
+        )
     if is_database(path):
         database = database or path
     export_dir = path.parent / default_output_name(path)
@@ -222,6 +259,19 @@ def own_database(
         if candidate.is_file() and candidate.stat().st_size > 0:
             return candidate.resolve()
     return None
+
+
+def dotnet_edit_log(export_dir: Path) -> Path:
+    return export_dir / ".tocode" / "dotnet" / "edits.json"
+
+
+def _is_dotnet(path: Path) -> bool:
+    try:
+        from ..backends.dotnet import is_dotnet_input
+
+        return bool(is_dotnet_input(path))
+    except Exception:  # noqa: BLE001 - not readable as .NET
+        return False
 
 
 def _backend_for_database(path: Path) -> str:

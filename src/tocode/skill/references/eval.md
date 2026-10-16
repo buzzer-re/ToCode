@@ -136,6 +136,55 @@ f = bv.get_function_at(resolve("main"))
 [f["name"] for f in r2.cmdj("aflj") if f["size"] > 1000]
 ```
 
+## .NET (`modules` are dnlib `ModuleDefMD`s, `module` the first; `decompile(target)` returns C#)
+
+Types and methods whose names look obfuscated (short or non-ASCII):
+
+```python
+import re
+odd = re.compile(r"^[^A-Za-z_]|^.{1,2}$")
+[(t.FullName, t.MDToken.Raw) for t in module.GetTypes() if odd.search(t.Name.String)][:50]
+```
+
+Methods that call an API (here `System.Net.WebClient::DownloadString`):
+
+```python
+hits = []
+for t in module.GetTypes():
+    for m in t.Methods:
+        if m.HasBody and any(
+            i.Operand is not None and "WebClient::DownloadString" in str(i.Operand)
+            for i in m.Body.Instructions
+        ):
+            hits.append((m.FullName, hex(m.MDToken.Raw)))
+hits
+```
+
+A string-decryption helper: a static method taking an int and returning a
+string, called from many places:
+
+```python
+from collections import Counter
+calls = Counter()
+for t in module.GetTypes():
+    for m in t.Methods:
+        if m.HasBody:
+            for i in m.Body.Instructions:
+                if i.OpCode.Name == "call" and i.Operand is not None and str(i.Operand).startswith("System.String ") and "(System.Int32)" in str(i.Operand):
+                    calls[str(i.Operand)] += 1
+calls.most_common(5)
+```
+
+The IL of one method as text:
+
+```python
+m = module.ResolveMethod(resolve("Billing.Invoice::Total").token & 0xFFFFFF)
+[f"{i.Offset:04x} {i.OpCode.Name} {i.Operand}" for i in m.Body.Instructions]
+```
+
+Prefer the `rename` / `rename_many` tools for names: they record the edit in
+the log and report what to re-render.
+
 ## angr (`project` is the angr Project; query-only)
 
 ```python

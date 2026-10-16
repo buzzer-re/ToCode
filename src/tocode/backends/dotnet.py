@@ -790,8 +790,11 @@ class DotnetSession:
     backend_label = ".NET"
     decompiler_label = "ICSharpCode.Decompiler + dnlib"
 
-    def __init__(self, found: DotnetInput) -> None:
+    def __init__(self, found: DotnetInput, *, in_memory: bool = False) -> None:
         self.input = found
+        # Load assemblies from bytes instead of mapping the files, so a live
+        # session can rewrite them (its patched copies) while they are open.
+        self.in_memory = in_memory
         self.assemblies: list[AssemblyInfo] = []
         self.types: dict[tuple[int, int], TypeInfo] = {}
         self.methods: list[MethodInfo] = []
@@ -814,7 +817,12 @@ class DotnetSession:
             if pe is None:
                 continue
             try:
-                module = ModuleDefMD.Load(str(item.path))
+                if self.in_memory:
+                    from System.IO import File  # type: ignore[import-not-found]
+
+                    module = ModuleDefMD.Load(File.ReadAllBytes(str(item.path)))
+                else:
+                    module = ModuleDefMD.Load(str(item.path))
             except Exception as exc:
                 raise ToCodeError(f"dnlib cannot load {item.entry}: {exc}") from exc
             info = self._assembly_info(len(self.assemblies), item, pe, module)

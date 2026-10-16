@@ -652,34 +652,65 @@ def _store_result(context: DotnetContext, result: DecompiledType) -> None:
     record = session.types.get((result.assembly, result.token))
     if record is None or record.cs_path is None or record.il_path is None:
         return
+    cs_text, il_text, cs_offset = type_texts(session, record, result)
+    if record.error is not None:
+        context.failures.append((record.full_name, record.error))
+        context.progress.file_log(
+            f"export {info.name}!{record.full_name} failed: {record.error}"
+        )
+    write_text_atomic(record.cs_path, cs_text)
+    write_text_atomic(record.il_path, il_text)
+    context.source_files.append(record.cs_path)
+    context.il_files.append(record.il_path)
+    assign_type_ranges(session, record, result, cs_text, il_text, cs_offset)
+    if record.error is None:
+        context.progress.file_log(
+            f"export {info.name}!{record.full_name} - {record.cs_lines} C# / "
+            f"{record.il_lines} IL lines done"
+        )
+
+
+def type_texts(
+    session: DotnetSession, record: TypeInfo, result: DecompiledType
+) -> tuple[str, str, int]:
+    """A top-level type's .cs and .il file contents, and the C# line offset
+    of the decompiled text inside the .cs file (its header line)."""
+    info = session.assemblies[record.assembly]
     header = f"// ToCode: {record.full_name.replace('/', '+')} (0x{record.token:08x}) from {info.name} {info.version}\n"
+    record.error = record.il_error = None
     if result.cs is not None:
         cs_text = header + result.cs.rstrip("\n") + "\n"
         cs_offset = 1
     else:
         record.error = result.cs_error or "unknown decompilation error"
-        context.failures.append((record.full_name, record.error))
         cs_text = header + _failure_stub(session, record)
         cs_offset = 0
-        context.progress.file_log(
-            f"export {info.name}!{record.full_name} failed: {record.error}"
-        )
     if result.il is not None:
         il_text = header + result.il.rstrip("\n") + "\n"
     else:
         record.il_error = result.il_error or "unknown disassembly error"
         il_text = header + f"// IL disassembly failed: {record.il_error}\n"
-    write_text_atomic(record.cs_path, cs_text)
-    write_text_atomic(record.il_path, il_text)
+    return cs_text, il_text, cs_offset
+
+
+def assign_type_ranges(
+    session: DotnetSession,
+    record: TypeInfo,
+    result: DecompiledType,
+    cs_text: str,
+    il_text: str,
+    cs_offset: int,
+) -> None:
+    """Line counts and every method's C#/IL line range for a written type."""
     record.cs_lines = cs_text.count("\n")
     record.il_lines = il_text.count("\n")
-    context.source_files.append(record.cs_path)
-    context.il_files.append(record.il_path)
     for nested in session.nested_types(record.assembly, record.token):
         nested.error = record.error
         nested.il_error = record.il_error
         nested.cs_lines = record.cs_lines
         nested.il_lines = record.il_lines
+        nested.cs_path = record.cs_path
+        nested.il_path = record.il_path
         for method_id in nested.methods:
             method = session.methods[method_id]
             span = result.cs_ranges.get(method.token)
@@ -693,11 +724,6 @@ def _store_result(context: DotnetContext, result: DecompiledType) -> None:
             il_span = result.il_ranges.get(method.token)
             if il_span is not None:
                 method.il_start, method.il_end = il_span[0] + 1, il_span[1] + 1
-    if record.error is None:
-        context.progress.file_log(
-            f"export {info.name}!{record.full_name} - {record.cs_lines} C# / "
-            f"{record.il_lines} IL lines done"
-        )
 
 
 def _store_assembly_attributes(

@@ -39,6 +39,24 @@ The binary is a small network daemon, stripped. After `tocode ./netd` and
    `pkt = parse_packet(buf, n);`. Repeat for `struct session` and the
    handlers until every function reads like source.
 
+## Deobfuscating a .NET assembly
+
+1. `info` and `sections` show the assemblies and obfuscation hints;
+   `functions` with `kind="app"` lists the methods.
+2. Start from the entry point (`Program::Main`, or the type `exports` and
+   `triage.json` point at) and from `strings`: each string's `used_by` names
+   the methods to read first.
+3. Name from behaviour: a method calling `File.ReadAllBytes` then
+   `Aes.Create` is a decryptor; one building `HttpClient` requests is a
+   network client. `xrefs` from a method shows the APIs and fields it uses.
+4. Rename in batches: `rename_many` with the types, methods, fields, and
+   properties you understood (`{"target": "a.b::c", "name": "LoadConfig"}`),
+   then `sync` and re-read: callers now show the new names.
+5. String encryption: find the helper with the `eval` recipe, decrypt the
+   values in `eval`, and record them as `set_comment` on each caller.
+6. `patched/<Assembly>.dll` holds the renamed assembly; reopen it in other
+   tools or run it.
+
 ## Struct recovery checklist
 
 - Gather every access to the pointer: the allocator's callers, functions that

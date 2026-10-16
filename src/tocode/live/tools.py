@@ -17,7 +17,8 @@ SESSION = {
 }
 TARGET = {
     "type": "string",
-    "description": "Function or symbol: an address (`0x401000`) or a name.",
+    "description": "Function or symbol: an address (`0x401000`) or a name. "
+    "For .NET: `Assembly!0x06000012`, `Namespace.Type`, or `Namespace.Type::Member`.",
 }
 FILTER = {
     "type": "string",
@@ -298,6 +299,26 @@ def build_tools() -> list[Tool]:
             },
             ["target", "name"],
             op="rename",
+        ),
+        Tool(
+            "rename_many",
+            "Rename many functions, types, members, or globals in one call "
+            "(deobfuscation passes). Each entry is {target, name}; failures are "
+            "reported per entry and do not stop the rest.",
+            EDIT,
+            {
+                "renames": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"target": TARGET, "name": {"type": "string"}},
+                        "required": ["target", "name"],
+                    },
+                }
+            },
+            ["renames"],
+            op="rename_many",
+            timeout=600,
         ),
         Tool(
             "set_type",

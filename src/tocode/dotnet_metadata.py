@@ -879,6 +879,15 @@ def build_dotnet_agents(
             "- Cite file paths, type and method names, metadata tokens, and line numbers for every major claim.",
             "- Be explicit about uncertainty, decompilation failures (`types.json` `decompile_error`), and unresolved references.",
             "",
+            "## Live Database (MCP)",
+            "",
+            "With the `tocode` MCP server (`tocode mcp`), `open` this folder to query methods, IL, "
+            "cross-references, and strings live, and to record what you learn: `rename` / "
+            "`rename_many` (types and members), `rename_local`, `set_comment`. `sync` rewrites the "
+            "types those edits touched here (a renamed type's file moves). Edits are kept in "
+            "`.tocode/dotnet/edits.json`, and `patched/` holds the renamed assemblies. Record "
+            "findings as names and comments, not as edits to `src/raw/`: a sync regenerates those files.",
+            "",
         ]
     )
     return "\n".join(lines)

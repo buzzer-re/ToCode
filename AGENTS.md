@@ -13,7 +13,7 @@ This repository contains ToCode, a Python-only binary exporter. ToCode takes one
 ## Project Layout
 
 - `src/tocode/cli.py`: command-line entry point for `tocode` (subcommands `mcp`, `sync`, `skill` are dispatched before the flat parser).
-- `src/tocode/live/`: the live layer. `jsonrpc.py` stdio MCP transport (standard library), `server.py` `tocode mcp` entry, `tools.py` the tool table (schemas, annotations, timeouts), `sessions.py` worker lifecycle (one spawned process per session, cap, idle close, timeouts, crash recovery), `targets.py` what `open` resolves to, `worker.py` the per-session process and query/eval operations, `edits.py` edit tools per backend and saving, `sync.py` incremental export updates and the `export` operation, `setup.py` `tocode sync`, `tocode skill install`, and MCP client registration.
+- `src/tocode/live/`: the live layer. `jsonrpc.py` stdio MCP transport (standard library), `server.py` `tocode mcp` entry, `tools.py` the tool table (schemas, annotations, timeouts), `sessions.py` worker lifecycle (one spawned process per session, cap, idle close, timeouts, crash recovery), `targets.py` what `open` resolves to, `worker.py` the per-session process and query/eval operations, `edits.py` edit tools per backend and saving, `sync.py` incremental export updates and the `export` operation, `setup.py` `tocode sync`, `tocode skill install`, and MCP client registration. .NET sessions: `dotnet_live.py` (`DotnetLiveSession`, picked by `worker.open_session` for `backend == "dotnet"`), `dotnet_edits.py` (the edit log and renames), `dotnet_sync.py` (rewrites the touched types' `.cs`/`.il` and the documents).
 - `src/tocode/syncstate.py`: what an export keeps for `sync` (`.tocode/sync/manifest.json` with the file layout, `.tocode/sync/renders/` with each function's render).
 - `src/tocode/skill/`: the agent skill (`SKILL.md`, `references/*.md`), shipped as package data.
 - `src/tocode/__init__.py`: package version and `export_from_binaryview()`, the in-UI Binary Ninja library entry.
@@ -144,6 +144,16 @@ Framework/runtime assemblies and native runtime libraries inside bundles and pac
   the export belongs to a folder export.
 - `CheckpointStore.complete()` keeps the renders for sync and removes only the
   checkpoint's own files; `.tocode/` also holds sync state and live logs.
+- .NET live: the database is the edit log `<export>/.tocode/dotnet/edits.json`
+  (edits addressed by assembly and metadata token), replayed onto the
+  original input on open; `patched/<Assembly>.dll` are renamed copies written
+  from it (tokens preserved). Renames change dnlib objects and update only the
+  affected inventory records and name-index entries; patched copies are
+  written when a query decompiles an edited assembly; the inventory reloads
+  once per sync. Local renames and comments are text edits applied when C# is
+  rendered (neither lives in metadata). Keep edits O(what they touch): use the
+  reverse indexes (`member_owner`, `field_users`, the word index) rather than
+  scanning all methods or files.
 - `src/tocode/skill/references/tools.md` is generated from `live/tools.py`
   (`python -m tocode.live.tools > src/tocode/skill/references/tools.md`);
   `tests/test_live_setup.py` fails when it is stale.

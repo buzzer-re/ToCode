@@ -113,7 +113,28 @@ To reconstruct the original program (names, types, structs) work bottom-up:
 
 Details and a worked example: [references/workflows.md](references/workflows.md).
 
-## 6. Rules of thumb
+## 6. .NET
+
+`tocode App.dll` (also apphosts, single-file bundles, `.nupkg`) exports C#
+and IL, one `.cs`/`.il` file per type. The same tools work after `open`:
+
+- Targets: `Assembly!0x06000012` (a metadata token: 02 type, 04 field,
+  06 method, 17 property, 14 event), `Namespace.Type`, or
+  `Namespace.Type::Member`. An ambiguous name lists the candidates.
+- Edits: `rename` (types, methods, fields, properties, events),
+  `rename_many`, `rename_local` (parameters, and locals as the decompiled C#
+  names them), `set_comment`. Types come from metadata, so `set_type`,
+  `declare_types`, `set_local_type`, `define_function`, and `undefine` do not
+  apply.
+- The database is an edit log in the export; ToCode also writes renamed
+  assemblies to `patched/` (open them in dnSpy/ILSpy, or run them).
+- `sync` rewrites the types the edits touched; a renamed type's file moves.
+- Obfuscated code: start at the entry point, `strings`, and `imports`; name
+  methods from the APIs they call, work outward, rename in batches with
+  `rename_many`, `sync`, and re-read. `eval` has the dnlib modules (`modules`)
+  and `decompile(target)`.
+
+## 7. Rules of thumb
 
 - Prefer the dedicated edit tools over `eval`: they report exactly what to
   re-render. After changing things in `eval`, call `touch(addr, ...)` for the

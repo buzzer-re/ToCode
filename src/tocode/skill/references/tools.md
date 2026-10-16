@@ -44,26 +44,26 @@ List functions (address, name, size, signature, kind, caller/callee counts).
 
 One function: prototype, params, locals, callers, callees, imports it calls, and where it is in the export (file:lines).
 
-- `target` (required): string. Function or symbol: an address (`0x401000`) or a name
+- `target` (required): string. Function or symbol: an address (`0x401000`) or a name. For .NET: `Assembly!0x06000012`, `Namespace.Type`, or `Namespace.Type::Member`
 
 ### `decompile`
 
 Decompile a function now, from the live database (reflects edits).
 
-- `target` (required): string. Function or symbol: an address (`0x401000`) or a name
+- `target` (required): string. Function or symbol: an address (`0x401000`) or a name. For .NET: `Assembly!0x06000012`, `Namespace.Type`, or `Namespace.Type::Member`
 
 ### `disassemble`
 
 Disassemble a function from the live database.
 
-- `target` (required): string. Function or symbol: an address (`0x401000`) or a name
+- `target` (required): string. Function or symbol: an address (`0x401000`) or a name. For .NET: `Assembly!0x06000012`, `Namespace.Type`, or `Namespace.Type::Member`
 - `max_lines`: integer
 
 ### `xrefs`
 
 Cross-references: `to` (callers and data reads/writes of the target) or `from` (what a function calls).
 
-- `target` (required): string. Function or symbol: an address (`0x401000`) or a name
+- `target` (required): string. Function or symbol: an address (`0x401000`) or a name. For .NET: `Assembly!0x06000012`, `Namespace.Type`, or `Namespace.Type::Member`
 - `direction`: `to` | `from`
 
 ### `strings`
@@ -113,7 +113,7 @@ One type's C declaration and members.
 
 Read bytes at an address (hex and ASCII, at most 64 KiB).
 
-- `address` (required): string. Function or symbol: an address (`0x401000`) or a name
+- `address` (required): string. Function or symbol: an address (`0x401000`) or a name. For .NET: `Assembly!0x06000012`, `Namespace.Type`, or `Namespace.Type::Member`
 - `size`: integer
 
 ### `search`
@@ -145,21 +145,27 @@ Save the session's database so edits survive the session.
 
 Rename a function or a global. Callers pick up the new name on the next `sync`.
 
-- `target` (required): string. Function or symbol: an address (`0x401000`) or a name
+- `target` (required): string. Function or symbol: an address (`0x401000`) or a name. For .NET: `Assembly!0x06000012`, `Namespace.Type`, or `Namespace.Type::Member`
 - `name` (required): string. New name (a C identifier)
+
+### `rename_many`
+
+Rename many functions, types, members, or globals in one call (deobfuscation passes). Each entry is {target, name}; failures are reported per entry and do not stop the rest.
+
+- `renames` (required): array
 
 ### `set_type`
 
 Set a function's prototype (`int parse(char *buf, size_t len)`) or a global's type (`struct config *g_config`).
 
-- `target` (required): string. Function or symbol: an address (`0x401000`) or a name
+- `target` (required): string. Function or symbol: an address (`0x401000`) or a name. For .NET: `Assembly!0x06000012`, `Namespace.Type`, or `Namespace.Type::Member`
 - `c_decl` (required): string
 
 ### `set_comment`
 
 Comment an instruction (`line`) or a whole function (`function`).
 
-- `address` (required): string. Function or symbol: an address (`0x401000`) or a name
+- `address` (required): string. Function or symbol: an address (`0x401000`) or a name. For .NET: `Assembly!0x06000012`, `Namespace.Type`, or `Namespace.Type::Member`
 - `text` (required): string
 - `kind`: `line` | `function`
 
@@ -173,7 +179,7 @@ Add or replace C types (structs, unions, enums, typedefs) in the database, e.g. 
 
 Rename a local variable or parameter of a function (as the decompiler names it).
 
-- `function` (required): string. Function or symbol: an address (`0x401000`) or a name
+- `function` (required): string. Function or symbol: an address (`0x401000`) or a name. For .NET: `Assembly!0x06000012`, `Namespace.Type`, or `Namespace.Type::Member`
 - `old` (required): string
 - `new` (required): string
 
@@ -181,7 +187,7 @@ Rename a local variable or parameter of a function (as the decompiler names it).
 
 Set the type of a function's local variable or parameter.
 
-- `function` (required): string. Function or symbol: an address (`0x401000`) or a name
+- `function` (required): string. Function or symbol: an address (`0x401000`) or a name. For .NET: `Assembly!0x06000012`, `Namespace.Type`, or `Namespace.Type::Member`
 - `name` (required): string
 - `c_type` (required): string
 
@@ -189,13 +195,13 @@ Set the type of a function's local variable or parameter.
 
 Create a function at an address the analysis missed.
 
-- `address` (required): string. Function or symbol: an address (`0x401000`) or a name
+- `address` (required): string. Function or symbol: an address (`0x401000`) or a name. For .NET: `Assembly!0x06000012`, `Namespace.Type`, or `Namespace.Type::Member`
 
 ### `undefine`
 
 Delete the function (or undefine the data) at an address.
 
-- `address` (required): string. Function or symbol: an address (`0x401000`) or a name
+- `address` (required): string. Function or symbol: an address (`0x401000`) or a name. For .NET: `Assembly!0x06000012`, `Namespace.Type`, or `Namespace.Type::Member`
 
 ## Project
 

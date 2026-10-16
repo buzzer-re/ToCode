@@ -64,7 +64,7 @@ def worker_main(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     _redirect_output(log_path)
     try:
-        live = LiveSession(target, log_path=log_path, **options)
+        live = open_session(target, log_path=log_path, options=options)
     except BaseException as exc:  # noqa: BLE001 - report every open failure
         conn.send(("failed", f"{type(exc).__name__}: {exc}"))
         return
@@ -97,6 +97,44 @@ def worker_main(
             conn.send(("error", request_id, f"{type(exc).__name__}: {exc}"))
         else:
             conn.send(("ok", request_id, result))
+
+
+def open_session(target: Target, *, log_path: Path, options: dict[str, Any]) -> Any:
+    """The session class for the target's backend (.NET or a native backend)."""
+    if target.backend == "dotnet":
+        from .dotnet_live import DotnetLiveSession
+
+        return DotnetLiveSession(
+            target,
+            log_path=log_path,
+            allow_eval=bool(options.get("allow_eval", True)),
+            allow_edits=bool(options.get("allow_edits", True)),
+        )
+    return LiveSession(target, log_path=log_path, **options)
+
+
+def run_python(namespace: dict[str, Any], code: str) -> tuple[Any, str, str | None]:
+    """Run an eval script: (last expression or `result`, output, traceback)."""
+    namespace["result"] = None
+    tree = ast.parse(code, mode="exec")
+    tail = None
+    last = tree.body[-1] if tree.body else None
+    if isinstance(last, ast.Expr):
+        tree.body.pop()
+        tail = ast.Expression(last.value)
+    output = io.StringIO()
+    error = None
+    value: Any = None
+    with redirect_stdout(output), redirect_stderr(output):
+        try:
+            exec(compile(tree, "<eval>", "exec"), namespace)  # noqa: S102
+            if tail is not None:
+                value = eval(compile(tail, "<eval>", "eval"), namespace)  # noqa: S307
+            else:
+                value = namespace.get("result")
+        except BaseException:  # noqa: BLE001 - the script's own failure
+            error = traceback.format_exc(limit=8)
+    return value, output.getvalue(), error
 
 
 # --------------------------------------------------------------------------
@@ -733,30 +771,11 @@ class LiveSession:
             return {"output": _clip(str(command(code)))}
         if language != "python":
             raise OpError("language must be python or r2")
-        namespace = self._namespace()
-        namespace["result"] = None
-        tree = ast.parse(code, mode="exec")
-        tail = None
-        last = tree.body[-1] if tree.body else None
-        if isinstance(last, ast.Expr):
-            tree.body.pop()
-            tail = ast.Expression(last.value)
-        output = io.StringIO()
-        error = None
-        value: Any = None
         before = set(self.dirty)
-        with redirect_stdout(output), redirect_stderr(output):
-            try:
-                exec(compile(tree, "<eval>", "exec"), namespace)  # noqa: S102
-                if tail is not None:
-                    value = eval(compile(tail, "<eval>", "eval"), namespace)  # noqa: S307
-                else:
-                    value = namespace.get("result")
-            except BaseException:  # noqa: BLE001 - the script's own failure
-                error = traceback.format_exc(limit=8)
+        value, output, error = run_python(self._namespace(), code)
         return {
             "result": _jsonable(value),
-            "stdout": _clip(output.getvalue()),
+            "stdout": _clip(output),
             "error": error,
             "touched": sorted(hex(item) for item in self.dirty - before),
         }

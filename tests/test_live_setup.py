@@ -81,7 +81,7 @@ def test_mcp_config_prints_every_client(capsys) -> None:
 
 def test_sync_command_updates_an_export(export: Path, capsys) -> None:
     assert cli.main(["sync", str(export)]) == 0
-    assert "0 functions re-rendered" in capsys.readouterr().out
+    assert "0 re-rendered" in capsys.readouterr().out
     assert cli.main(["sync", str(export), "--full", "-q"]) == 0
     assert cli.main(["sync", str(export.parent / "nope")]) == 1
 
@@ -111,6 +111,9 @@ _COMMON = {
     "type",
     "data",
     "size",
+    # Generic reverse-engineering vocabulary the docs need (a .NET "metadata
+    # token"); it names no program's design.
+    "token",
 }
 
 

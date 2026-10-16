@@ -43,16 +43,16 @@ def sync_main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     from .targets import Target, resolve
-    from .worker import LiveSession
+    from .worker import open_session
 
     try:
         target = resolve(args.export, database=args.database)
         if not isinstance(target, Target) or target.export_dir is None:
             raise ToCodeError(f"{args.export} is not a single-binary export")
-        live = LiveSession(
+        live = open_session(
             target,
             log_path=target.export_dir / "tocode.log",
-            binja_dir=str(args.binja_dir) if args.binja_dir else None,
+            options={"binja_dir": str(args.binja_dir) if args.binja_dir else None},
         )
         try:
             report = live.dispatch("sync", {"mode": "full" if args.full else "auto"})
@@ -62,11 +62,17 @@ def sync_main(argv: list[str]) -> int:
         print(f"tocode: {exc}", file=sys.stderr)
         return 1
     if not args.quiet:
+        # Native and .NET reports differ: say what each one has.
+        parts = [
+            f"{report['rerendered']} re-rendered",
+            f"{len(report.get('changed', []))} changed",
+        ]
+        for key in ("added", "removed", "moved"):
+            if report.get(key):
+                parts.append(f"{len(report[key])} {key}")
+        parts.append(f"{len(report['files_rewritten'])} files rewritten")
         print(
-            f"Synced {report['export_dir']}: {report['rerendered']} functions re-rendered, "
-            f"{len(report['changed'])} changed, {len(report['added'])} added, "
-            f"{len(report['removed'])} removed, {len(report['files_rewritten'])} files rewritten "
-            f"in {report['seconds']}s"
+            f"Synced {report['export_dir']}: {', '.join(parts)} in {report['seconds']}s"
         )
     return 0
 

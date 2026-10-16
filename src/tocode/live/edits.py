@@ -91,6 +91,7 @@ def _default_bndb(live: "LiveSession") -> Path:
 def register(live: "LiveSession") -> None:
     ops: dict[str, Callable[[dict[str, Any]], Any]] = {
         "rename": lambda args: _rename(live, args),
+        "rename_many": lambda args: _rename_many(live, args),
         "set_type": lambda args: _set_type(live, args),
         "set_comment": lambda args: _set_comment(live, args),
         "declare_types": lambda args: _declare_types(live, args),
@@ -179,6 +180,29 @@ def _rename(live: "LiveSession", args: dict[str, Any]) -> dict[str, Any]:
         "kind": "data",
         "pending_sync": touched,
     }
+
+
+def _rename_many(live: "LiveSession", args: dict[str, Any]) -> dict[str, Any]:
+    renames = args.get("renames") or []
+    if not isinstance(renames, list) or not renames:
+        raise OpError("rename_many needs `renames`: a list of {target, name}")
+    done, errors, pending = 0, [], set()
+    # Resolve every target first: names refer to the state before the batch.
+    resolved = []
+    for item in renames:
+        try:
+            resolved.append((item, live.resolve(item.get("target"))))
+        except OpError as exc:
+            errors.append({"target": item.get("target"), "error": str(exc)})
+    for item, address in resolved:
+        try:
+            result = _rename(live, {"target": address, "name": item.get("name")})
+        except OpError as exc:
+            errors.append({"target": item.get("target"), "error": str(exc)})
+            continue
+        done += 1
+        pending.update(result["pending_sync"])
+    return {"renamed": done, "errors": errors, "pending_sync": sorted(pending)}
 
 
 def _set_type(live: "LiveSession", args: dict[str, Any]) -> dict[str, Any]:
